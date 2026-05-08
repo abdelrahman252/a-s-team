@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A's Team Dashboard</title>
+<!-- PERF: Preconnect so font DNS resolves before we need it -->
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- PERF: Only load weights actually used — removed unused weights, async load -->
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"></noscript>
+<link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+<!-- PERF: SVG gradient defs inline — avoids JS injection overhead -->
+<svg style="position:absolute;width:0;height:0;overflow:hidden;" aria-hidden="true">
+  <defs>
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff2d7a"/>
+      <stop offset="50%" stop-color="#7b5cf0"/>
+      <stop offset="100%" stop-color="#00d4ff"/>
+    </linearGradient>
+  </defs>
+</svg>
+<div id="splash">
+  <div class="splash-grid"></div>
+  <div class="orb orb1"></div>
+  <div class="orb orb2"></div>
+  <div class="splash-center">
+    <div class="splash-ring-wrap">
+      <svg class="splash-ring-track-svg" viewBox="0 0 120 120"><circle class="ring-track" cx="60" cy="60" r="54"/></svg>
+      <div class="ring-rotate-wrap">
+        <svg class="splash-ring-spin-svg" viewBox="0 0 120 120"><circle class="ring-spin" cx="60" cy="60" r="54"/></svg>
+      </div>
+      <div class="splash-logo-inner">A</div>
+    </div>
+    <div class="splash-title-wrap">
+      <div class="splash-title">A's Team</div>
+      <div class="splash-title-line"></div>
+      <div class="splash-sub-title">Dashboard</div>
+    </div>
+    <div class="splash-bar-wrap">
+      <div class="splash-bar-track"><div class="splash-bar-fill" id="splashBar"></div></div>
+      <div class="splash-bar-label" id="splashLabel">Loading...</div>
+    </div>
+    <div class="splash-dots">
+      <div class="sdot" style="--c:#ff2d7a;--d:0s">AB</div>
+      <div class="sdot" style="--c:#7b5cf0;--d:.08s">AR</div>
+      <div class="sdot" style="--c:#00b4d8;--d:.16s">AS</div>
+      <div class="sdot" style="--c:#f7931e;--d:.24s">AA</div>
+      <div class="sdot" style="--c:#e040fb;--d:.32s">AM</div>
+    </div>
+  </div>
+</div>
+<div class="shell" id="shell" style="display:none;"></div>
+
+<script>
+// ── CONSTANTS & STATE ──
+const MEMBERS=[
+  {id:'abubakr',    name:'Abubakr',    color:'#ff2d7a',grad:'linear-gradient(135deg,#ff2d7a,#ff8c60)',initials:'AB',isPrimary:true, tiktokCount:3},
+  {id:'abdelrahman',name:'Abdelrahman',color:'#7b5cf0',grad:'linear-gradient(135deg,#7b5cf0,#4f9ef8)',initials:'AR',isPrimary:false,tiktokCount:1},
+  {id:'assem',      name:'Assem',      color:'#00b4d8',grad:'linear-gradient(135deg,#00b4d8,#00d4a8)',initials:'AS',isPrimary:false,tiktokCount:1},
+  {id:'ahmedadel',  name:'Ahmed Adel', color:'#f7931e',grad:'linear-gradient(135deg,#f7931e,#ffd700)',initials:'AA',isPrimary:false,tiktokCount:1},
+  {id:'ahmedmo',    name:'Ahmed Mo',   color:'#e040fb',grad:'linear-gradient(135deg,#e040fb,#ff6b9d)',initials:'AM',isPrimary:false,tiktokCount:1},
+];
+// PERF: Precompute date values once at startup
+const _today=new Date();
+const todayIso=_today.toISOString().split('T')[0];
+const todayStr=_today.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function fmtDate(s){if(!s)return'';const[y,m,d]=s.split('-');return`${d} ${MON[+m-1]} ${y}`;}
+function cpaInfo(v){if(v<=20.5)return{color:'#22d36e',label:'Good'};if(v<=22.5)return{color:'#f7931e',label:'Average'};return{color:'#ff2d7a',label:'High'};}
+function getMData(id){return dashData?.[id]||{spend:0,totalOrders:0,avgQtyTotal:0,cpa:0,deliveredOrders:0,avgQtyDelivered:0,sumTahseel:0,avgTahseel:0};}
+
+let PAGE='splash',dashData=null,dashDate='',selMembers=new Set(),dateMode='today',curPerson=0,viewMode='single';
+
+// PERF: Icon constants — no SVG rebuilt each call
+const IC={
+  dash:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>`,
+  play:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
+  gear:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
+  out:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`,
+};
+
+// ── ROUTER ──
+function navigate(page,params={}){
+  PAGE=page;
+  const s=document.getElementById('shell');
+  // PERF: Rebuild shell HTML — it's fast (no nested data) and avoids stale state
+  s.innerHTML=buildShell(page);
+  if(page==='setup')     {buildSetupContent();initSetup();}
+  if(page==='execution') {buildExecContent();initExec();}
+  if(page==='running')   {buildRunningContent();initRunning(params);}
+  if(page==='dashboard') {if(params.data)dashData=params.data;buildDashContent();}
+}
+
+function buildShell(page){
+  const titles={setup:'Team Setup',execution:'Execution Setup',running:'Bot Running...',dashboard:'Dashboard'};
+  const subs={setup:'Configure team credentials',execution:'Select members and date range',running:'Please wait while the bot collects data',dashboard:`A's Team · ${dashDate}`};
+  return `<div class="sidebar">
+    <div class="sb-logo">A</div>
+    <div class="sb-icon${page==='dashboard'?' active':''}" title="Dashboard" onclick="if(dashData)navigate('dashboard',{data:dashData})">${IC.dash}</div>
+    <div class="sb-icon${page==='execution'?' active':''}" title="Run Bot" onclick="navigate('execution')">${IC.play}</div>
+    <div class="sb-divider"></div>
+    <div class="sb-icon${page==='setup'?' active':''}" title="Settings" onclick="navigate('setup')">${IC.gear}</div>
+    <div class="sb-bottom"><div class="sb-icon" title="Reset Data" onclick="doReset()">${IC.out}</div></div>
+  </div>
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-left"><h1>${titles[page]||page}</h1><p>${subs[page]||''}</p></div>
+      <div class="topbar-right" id="topbarRight"></div>
+    </div>
+    <div class="page-scroll" id="pageContent"></div>
+  </div>`;
+}
+
+async function doReset(){if(confirm('Reset all credentials and data?')){await window.api.resetConfig();dashData=null;dashDate='';navigate('setup');}}
+
+// ── SETUP PAGE ──
+function buildSetupContent(){
+  const cards=MEMBERS.map(m=>{
+    const ttInputs=Array.from({length:m.tiktokCount},(_,i)=>`<div class="input-row">${m.tiktokCount>1?`<span class="input-label">Acc ${i+1}</span>`:''}<input class="inp" id="${m.id}-tt-${i}" placeholder="https://tiktok.com/@username" type="url"></div>`).join('');
+    const ring=m.isPrimary?`<div style="position:relative;width:42px;height:42px;flex-shrink:0;"><div style="position:absolute;inset:-2px;border-radius:50%;background:var(--grad);"></div><div class="avatar av-md" style="position:absolute;inset:2px;background:${m.grad};">${m.initials}</div></div>`:`<div class="avatar av-md" style="background:${m.grad};flex-shrink:0;">${m.initials}</div>`;
+    return `<div class="person-card${m.isPrimary?' primary':''}">
+      <div class="card-head">${ring}<div class="name-area"><div class="pname">${m.name}</div><div class="prole"><span class="dot-g"></span>${m.isPrimary?'Primary Manager':'Team Member'}</div></div>${m.isPrimary?'<div class="pm-badge">👑 MANAGER</div>':''}</div>
+      <div class="sec-head"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8l4 4-4 4"/></svg>TikTok Account${m.tiktokCount>1?'s':''}</div>
+      ${ttInputs}
+      <div style="height:1px;background:var(--border);margin:14px 0;"></div>
+      <div class="sec-head"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ff2d7a" stroke-width="2.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>System Login</div>
+      <div class="sys-row"><input class="inp" id="${m.id}-email" placeholder="Email or Username" type="text"><div class="pass-wrap"><input class="inp" id="${m.id}-pass" placeholder="Password" type="password"><button class="eye-btn" onclick="toggleEye(this)" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button></div></div>
+    </div>`;
+  });
+  document.getElementById('pageContent').innerHTML=`<div style="max-width:1060px;margin:30px auto 0 auto;">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:22px;"><div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--text3);text-transform:uppercase;">Team Members</div><div style="margin-left:auto;background:var(--bg3);border:1px solid var(--border2);padding:5px 14px;border-radius:999px;font-size:12px;font-weight:600;color:var(--text2);">A's Team · 5 Members</div></div>
+    <div class="grid-top">${cards.slice(0,3).join('')}</div>
+    <div class="grid-bot">${cards.slice(3).join('')}</div>
+    <div style="margin-top:26px;"><button class="btn btn-primary btn-full" id="saveBtn" onclick="saveConfig()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save Changes</button><div class="save-note"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22d36e" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>All credentials saved securely and encrypted on your device</div></div>
+  </div>`;
+}
+
+function toggleEye(btn){const i=btn.previousElementSibling;const show=i.type==='password';i.type=show?'text':'password';btn.innerHTML=show?'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>':'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';}
+
+async function initSetup(){const cfg=await window.api.getConfig();if(!cfg?.members)return;cfg.members.forEach(m=>{(m.tiktokAccounts||[]).forEach((u,i)=>{const el=document.getElementById(`${m.id}-tt-${i}`);if(el)el.value=u||'';});const ee=document.getElementById(`${m.id}-email`),pe=document.getElementById(`${m.id}-pass`);if(ee)ee.value=m.khodEmail||'';if(pe)pe.value=m.khodPassword||'';});}
+
+async function saveConfig(){
+  const btn=document.getElementById('saveBtn');btn.textContent='Saving...';btn.disabled=true;
+  const members=MEMBERS.map(m=>({...m,tiktokAccounts:Array.from({length:m.tiktokCount},(_,i)=>(document.getElementById(`${m.id}-tt-${i}`)?.value||'').trim()),khodEmail:(document.getElementById(`${m.id}-email`)?.value||'').trim(),khodPassword:(document.getElementById(`${m.id}-pass`)?.value||'').trim()}));
+  await window.api.saveConfig({members});
+  btn.innerHTML='✓ Saved!';btn.style.background='linear-gradient(135deg,#22d36e,#00d4ff)';
+  setTimeout(()=>navigate('execution'),900);
+}
+
+// ── EXECUTION PAGE ──
+function buildExecContent(){
+  const allCard=`<div class="person-sel all-card" id="sel-all" onclick="toggleSel('all')"><div class="check-ring"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div><div class="all-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div class="sel-name">All Users</div><div class="sel-sub">Select everyone</div><div class="sel-count" style="color:var(--cyan);">5 members</div></div>`;
+  const mcards=MEMBERS.map(m=>`<div class="person-sel" id="sel-${m.id}" onclick="toggleSel('${m.id}')"><div class="check-ring"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div><div class="sel-avatar" style="background:${m.grad};">${m.initials}</div><div class="sel-name">${m.name}</div><div class="sel-sub"><span class="dot-g"></span>Active</div><div class="sel-count">${m.tiktokCount>1?m.tiktokCount+' accs':'Selected'}</div></div>`).join('');
+  document.getElementById('pageContent').innerHTML=`<div style="max-width:1060px;margin:30px auto 0 auto;">
+    <div class="phase-badge"><span class="phase-dot"></span>PHASE 2</div>
+    <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:26px;margin-bottom:6px;">Execution Setup</div>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:22px;">Select team members and date range, then launch the bot.</div>
+    <div class="section-block">
+      <div class="block-title"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ff2d7a" stroke-width="2.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><h2>Select Users</h2></div>
+      <p class="block-sub">Choose one or more team members to run the bot for.</p>
+      <div class="people-row">${allCard}${mcards}</div>
+      <div class="sel-info-bar"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#00d4ff" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>You have selected <span id="selCountSpan">0 users</span> — bot runs sequentially</div>
+    </div>
+    <div class="exec-bottom-row">
+      <div class="section-block" style="margin-bottom:0;">
+        <div class="block-title"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ff2d7a" stroke-width="2.5"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg><h2>Select Date</h2></div>
+        <p class="block-sub">Choose the date range for the bot run.</p>
+        <div class="date-tabs">
+          <div class="dtab active" id="dtab-today" onclick="setDMode('today')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Today</div>
+          <div class="dtab" id="dtab-single" onclick="setDMode('single')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg>Single Date</div>
+          <div class="dtab" id="dtab-range" onclick="setDMode('range')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>Date Range</div>
+        </div>
+        <div id="dateArea">
+          <div id="dd-today" class="today-display">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <span style="font-size:14px;font-weight:600;">${todayStr}</span><span style="font-size:12px;color:var(--text3);">— Today</span>
+          </div>
+          <div id="dd-single" style="display:none;max-width:260px;">
+            <input class="date-inp" type="date" id="singleDate" value="${todayIso}" onchange="updateExecSum()">
+          </div>
+          <div id="dd-range" style="display:none;">
+            <div style="display:flex;gap:10px;align-items:center;">
+              <input class="date-inp" style="flex:1;" type="date" id="startDate" value="${todayIso}" onchange="updateExecSum()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" style="flex-shrink:0;"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+              <input class="date-inp" style="flex:1;" type="date" id="endDate" value="${todayIso}" onchange="updateExecSum()">
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="summary-box">
+        <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px;margin-bottom:4px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>Summary</div>
+        <p style="font-size:12px;color:var(--text3);margin-bottom:16px;padding-left:22px;">Review before launching.</p>
+        <div class="sum-row"><div class="sum-row-label"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--pink)" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>Users Selected</div><div class="sum-row-val"><div id="sumCount" style="margin-bottom:4px;">0 users</div><div id="sumAvatars" style="display:flex;flex-wrap:wrap;gap:3px;"></div></div></div>
+        <div class="sum-row"><div class="sum-row-label"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg>Date Range</div><div class="sum-row-val" id="sumDate" style="color:var(--text2);">Today</div></div>
+        <div class="sum-row"><div class="sum-row-label"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22d36e" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Total Days</div><div class="sum-row-val" id="sumDays" style="color:var(--text2);">1 day</div></div>
+        <div class="sum-row" style="border-bottom:none;"><div class="sum-row-label"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f7931e" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Run Order</div><div class="sum-row-val" style="color:var(--text3);font-size:11px;font-weight:400;">Sequential (1 by 1)</div></div>
+        <!-- Launch Minimized toggle -->
+        <div style="margin:14px 0 10px 0;padding:10px 14px;background:var(--bg3,rgba(255,255,255,.04));border:1px solid var(--border,rgba(255,255,255,.08));border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+          <div>
+            <div style="font-size:12px;font-weight:700;margin-bottom:2px;">🪟 Launch Minimized</div>
+            <div style="font-size:11px;color:var(--text2,#888);line-height:1.4;max-width:160px;">Chrome runs silently in background</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+            <button id="exec-btn-launchmin" style="width:44px;height:24px;border-radius:12px;border:none;cursor:pointer;position:relative;transition:background 0.25s;background:var(--border,rgba(255,255,255,.1));flex-shrink:0;">
+              <span id="exec-launchmin-knob" style="position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform 0.25s;"></span>
+            </button>
+            <span id="exec-launchmin-label" style="font-size:11px;color:var(--text2,#888);min-width:24px;">Off</span>
+          </div>
+        </div>
+        <button class="run-btn" id="runBtn" disabled onclick="startBot()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run Execution</button>
+        <div style="text-align:center;font-size:11px;color:var(--text3);margin-top:8px;display:flex;align-items:center;justify-content:center;gap:5px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Runs sequentially for selected users</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+let _launchMinimized=false;
+function _updateLaunchMinUI(){
+  const btn=document.getElementById('exec-btn-launchmin');
+  const knob=document.getElementById('exec-launchmin-knob');
+  const lbl=document.getElementById('exec-launchmin-label');
+  if(!btn)return;
+  if(_launchMinimized){btn.style.background='var(--accent,#7b5cf0)';knob.style.transform='translateX(20px)';lbl.textContent='On';lbl.style.color='var(--accent,#7b5cf0)';}else{btn.style.background='var(--border,rgba(255,255,255,.1))';knob.style.transform='translateX(0)';lbl.textContent='Off';lbl.style.color='var(--text2,#888)';}
+}
+function initExec(){selMembers=new Set();dateMode='today';_lastExecState='';updateExecSum();window.api.getConfig().then(cfg=>{_launchMinimized=cfg?.launchMinimized||false;_updateLaunchMinUI();document.getElementById('exec-btn-launchmin')?.addEventListener('click',async()=>{_launchMinimized=!_launchMinimized;await window.api.setLaunchMinimized(_launchMinimized);_updateLaunchMinUI();});});}
+
+function toggleSel(id){
+  if(id==='all'){
+    const allSel=selMembers.size===5;
+    selMembers.clear();
+    document.getElementById('sel-all')?.classList.toggle('selected',!allSel);
+    MEMBERS.forEach(m=>{document.getElementById(`sel-${m.id}`)?.classList.toggle('selected',!allSel);if(!allSel)selMembers.add(m.id);});
+  }else{
+    const el=document.getElementById(`sel-${id}`);
+    if(selMembers.has(id)){selMembers.delete(id);el?.classList.remove('selected');}
+    else{selMembers.add(id);el?.classList.add('selected');}
+    document.getElementById('sel-all')?.classList.toggle('selected',selMembers.size===5);
+  }
+  _lastExecState='';updateExecSum();
+}
+
+function setDMode(mode){
+  dateMode=mode;
+  ['today','single','range'].forEach(m=>{
+    document.getElementById(`dtab-${m}`)?.classList.toggle('active',m===mode);
+    const d=document.getElementById(`dd-${m}`);
+    if(d)d.style.display=m===mode?(mode==='today'?'flex':'block'):'none';
+  });
+  _lastExecState='';updateExecSum();
+}
+
+function getDateVals(){
+  if(dateMode==='today')return{from:todayIso,to:todayIso,label:todayStr,days:1};
+  if(dateMode==='single'){const v=document.getElementById('singleDate')?.value;if(!v)return null;return{from:v,to:v,label:fmtDate(v),days:1};}
+  const s=document.getElementById('startDate')?.value,e=document.getElementById('endDate')?.value;
+  if(!s||!e)return null;
+  const diff=Math.round((new Date(e)-new Date(s))/86400000)+1;
+  return diff>0?{from:s,to:e,label:`${fmtDate(s)} → ${fmtDate(e)}`,days:diff}:null;
+}
+
+// PERF: Cache key to skip redundant DOM updates
+let _lastExecState='';
+function updateExecSum(){
+  const n=selMembers.size;const dv=getDateVals();
+  const key=`${n}|${dv?.label||''}`;
+  if(key===_lastExecState)return;
+  _lastExecState=key;
+  document.getElementById('selCountSpan').textContent=`${n} user${n!==1?'s':''}`;
+  document.getElementById('sumCount').textContent=n===0?'None selected':`${n} user${n!==1?'s':''}`;
+  const av=document.getElementById('sumAvatars');
+  if(av)av.innerHTML=MEMBERS.filter(m=>selMembers.has(m.id)).map(m=>`<div style="width:22px;height:22px;border-radius:50%;background:${m.color};display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;border:2px solid var(--bg2);">${m.initials}</div>`).join('');
+  document.getElementById('sumDate').textContent=dv?dv.label:'Not set';
+  document.getElementById('sumDays').textContent=dv?.days?`${dv.days} day${dv.days!==1?'s':''}` :'—';
+  const rb=document.getElementById('runBtn');if(rb)rb.disabled=!(n>0&&dv&&dv.days>0);
+}
+
+async function startBot(){const dv=getDateVals();if(!dv||selMembers.size===0)return;navigate('running',{members:[...selMembers],dateFrom:dv.from,dateTo:dv.to,dateLabel:dv.label});}
+
+// ── RUNNING PAGE ──
+function buildRunningContent(){
+  document.getElementById('pageContent').innerHTML=`<div style="max-width:800px;margin:30px auto 0 auto;">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;background:var(--bg2);border:1px solid var(--border2);border-radius:12px;padding:16px 20px;">
+      <div style="width:10px;height:10px;border-radius:50%;background:var(--cyan);animation:pulse 1.5s infinite;" id="runPulse"></div>
+      <div><div style="font-family:'Syne',sans-serif;font-weight:700;font-size:15px;" id="runStatus">Bot is running...</div><div style="font-size:12px;color:var(--text3);margin-top:2px;" id="runPhase">Starting up...</div></div>
+    </div>
+    <div style="font-size:11px;font-weight:600;letter-spacing:1px;color:var(--text3);text-transform:uppercase;margin-bottom:8px;">Live Log</div>
+    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:14px;height:340px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6;" id="logWrap"></div>
+    <button class="btn btn-ghost" style="margin-top:14px;" onclick="navigate('execution')">← Back to Setup</button>
+  </div>`;
+}
+
+function initRunning(params){
+  window.api.offBotLog();window.api.offBotProgress();
+  const logWrap=document.getElementById('logWrap');
+  // PERF: Batch log lines with requestAnimationFrame — no per-log reflows
+  let _buf=[],_raf=null;
+  window.api.onBotLog(log=>{
+    _buf.push(log);
+    if(!_raf)_raf=requestAnimationFrame(()=>{
+      _raf=null;
+      const frag=document.createDocumentFragment();
+      _buf.forEach(l=>{const d=document.createElement('div');d.style.color=l.type==='ok'?'#22d36e':l.type==='warn'?'#f7931e':l.type==='error'?'#ff2d7a':'#8b91b0';d.textContent=l.msg;frag.appendChild(d);});
+      _buf=[];
+      if(logWrap){logWrap.appendChild(frag);logWrap.scrollTop=logWrap.scrollHeight;}
+    });
+  });
+  window.api.onBotProgress(p=>{const el=document.getElementById('runPhase');if(el&&p.memberName)el.textContent=`[${(p.memberIndex||0)+1}/${p.totalMembers||'?'}] ${p.memberName} — ${p.phase||''}`;});
+  window.api.runBot({members:params.members,dateFrom:params.dateFrom,dateTo:params.dateTo}).then(res=>{
+    window.api.offBotLog();window.api.offBotProgress();
+    const st=document.getElementById('runStatus'),pulse=document.getElementById('runPulse');
+    if(pulse)pulse.style.animation='none';
+    if(res.ok){dashData=res.result;dashDate=params.dateLabel||params.dateFrom;if(st){st.textContent='✅ Complete — loading dashboard...';st.style.color='var(--green)';}setTimeout(()=>navigate('dashboard',{data:dashData}),1200);}
+    else{if(st){st.textContent=`❌ Error: ${res.error}`;st.style.color='var(--pink)';}}
+  });
+}
+
+// ── DASHBOARD ──
+function buildDashContent(){
+  const tr=document.getElementById('topbarRight');
+  if(tr)tr.innerHTML=`<div class="view-toggle"><button class="vt-btn${viewMode==='single'?' active':''}" onclick="switchView('single')">Single</button><button class="vt-btn${viewMode==='multi'?' active':''}" onclick="switchView('multi')">Team</button></div>${viewMode==='single'?`<div class="person-pill" onclick="cyclePerson()"><span class="dot-g"></span><span id="pillName">${MEMBERS[curPerson].name}</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg></div>`:''}<div style="width:34px;height:34px;border-radius:8px;background:var(--bg3);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text2);" onclick="buildDashContent()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></div>`;
+  const pc=document.getElementById('pageContent');if(!pc)return;
+  if(!dashData){pc.innerHTML=`<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:80px 20px;color:var(--text3);text-align:center;"><div style="font-size:48px;">📊</div><div style="font-family:'Syne',sans-serif;font-weight:700;font-size:18px;color:var(--text2);">No data yet</div><p>Run the bot first to see your dashboard.</p><button class="btn btn-primary" style="margin-top:8px;" onclick="navigate('execution')">← Run Bot</button></div>`;return;}
+  if(viewMode==='single'){pc.innerHTML=buildSingleView();requestAnimationFrame(()=>{initSparks();drawTrend('spend');});}
+  else{pc.innerHTML=buildMultiView();}
+}
+function switchView(v){viewMode=v;buildDashContent();}
+function cyclePerson(){curPerson=(curPerson+1)%MEMBERS.length;buildDashContent();}
+
+function sCard(sc,si,color,label,val,spId,iconSvg,extra='',desc=''){
+  return `<div class="stat-card ${sc}"><div class="stat-icon ${si}">${iconSvg}</div><div class="stat-label">${label}</div><div class="stat-val" style="color:${color};">${val}</div>${extra}<div class="sparkline-wrap"><canvas id="${spId}"></canvas></div>${desc?`<div class="card-desc">${desc}</div>`:''}</div>`;
+}
+
+function buildSingleView(){
+  const m=MEMBERS[curPerson];const d=getMData(m.id);const ci=cpaInfo(d.cpa);
+  const ico=(c,s)=>`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2.5">${s}</svg>`;
+  return `<div style="padding:28px 32px;">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+    <div class="avatar av-lg" style="background:${m.grad};">${m.initials}</div>
+    <div><div style="font-family:'Syne',sans-serif;font-weight:800;font-size:20px;">${m.name}</div><div style="font-size:12px;color:var(--text3);display:flex;align-items:center;gap:5px;margin-top:3px;"><span class="dot-g"></span>${m.isPrimary?'Primary Manager':'Team Member'}</div></div>
+    <div style="margin-left:auto;background:var(--bg3);border:1px solid var(--border2);border-radius:999px;padding:6px 14px;font-size:12px;color:var(--text2);display:flex;align-items:center;gap:6px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg>${dashDate}</div>
+  </div>
+  <div class="grid-5 mb-12">
+    ${sCard('sc-pink','si-pink','#ff2d7a','Spend (TikTok)',`$${(d.spend||0).toFixed(2)}`,'sp1',ico('#ff2d7a','<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>'),'','Total USD spent on TikTok ads.')}
+    ${sCard('sc-cyan','si-cyan','#00d4ff','Total Orders',d.totalOrders||0,'sp2',ico('#00d4ff','<circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>'),'','All orders placed on selected date.')}
+    ${sCard('sc-purple','si-purple',ci.color,'CPA (Spend ÷ Orders)',`$${(d.cpa||0).toFixed(2)}`,'sp3',`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${ci.color}" stroke-width="2.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`,`<div style="font-size:10px;font-weight:700;color:${ci.color};margin-top:3px;">${ci.label}</div>`,'Cost Per Acquisition. Lower is better.')}
+    ${sCard('sc-green','si-green','#22d36e','Delivered Orders',d.deliveredOrders||0,'sp4',ico('#22d36e','<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>'),'','Orders that reached Delivered status.')}
+    ${sCard('sc-yellow','si-yellow','#f7931e','Sum المطلوب تحصيله',`﷼${(d.sumTahseel||0).toLocaleString()}`,'sp5',ico('#f7931e','<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>'),'','Total to be collected across all delivered orders.')}
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr) 1.6fr;gap:12px;">
+    ${sCard('sc-teal','si-teal','#00d4a8','Avg المطلوب تحصيله',`﷼${(d.avgTahseel||0).toFixed(2)}`,'sp6',ico('#00d4a8','<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>'),'','Average تحصيله per delivered order.')}
+    ${sCard('sc-blue','si-blue','#4f9ef8','Avg Qty (Total Orders)',(d.avgQtyTotal||0).toFixed(2),'sp7',ico('#4f9ef8','<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/>'),'','Average items per order.')}
+    ${sCard('sc-rose','si-rose','#fb7185','Avg Qty (Delivered)',(d.avgQtyDelivered||0).toFixed(2),'sp8',ico('#fb7185','<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>'),'','Average items per delivered order.')}
+    <div class="stat-card" style="border:1px solid var(--border);"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;"><span style="font-family:'Syne',sans-serif;font-weight:700;font-size:13px;">Performance Trend</span><select style="background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text2);font-family:'DM Sans',sans-serif;outline:none;cursor:pointer;" onchange="drawTrend(this.value)"><option value="spend">Spend</option><option value="orders">Orders</option><option value="cpa">CPA</option></select></div><div style="position:relative;height:100px;"><canvas id="trendChart"></canvas></div><div class="card-desc" style="margin-top:8px;">7-day trend for selected metric.</div></div>
+  </div>
+  </div>`;
+}
+
+function buildMultiView(){
+  const rows=MEMBERS.map((m,i)=>{const d=getMData(m.id);const ci=cpaInfo(d.cpa);return`<tr><td style="color:var(--text3);font-weight:600;">${i+1}</td><td><div style="display:flex;align-items:center;gap:8px;"><div class="avatar av-sm" style="background:${m.color};">${m.initials}</div><div><div style="font-weight:600;font-size:13px;">${m.name}</div><div style="font-size:10px;color:var(--text3);">${m.isPrimary?'Manager':'Member'}</div></div></div></td><td class="mono" style="color:var(--pink);">$${(d.spend||0).toFixed(2)}</td><td class="mono">${d.totalOrders||0}</td><td class="mono">${(d.avgQtyTotal||0).toFixed(2)}</td><td><div class="mono" style="color:${ci.color};font-weight:700;">$${(d.cpa||0).toFixed(2)}</div><div style="font-size:10px;font-weight:700;color:${ci.color};">${ci.label}</div></td><td class="mono">${d.deliveredOrders||0}</td><td class="mono">${(d.avgQtyDelivered||0).toFixed(2)}</td><td class="mono" style="color:var(--yellow);">﷼${(d.sumTahseel||0).toLocaleString()}</td><td><div class="mono" style="color:${ci.color};font-weight:700;">﷼${(d.avgTahseel||0).toFixed(2)}</div><div style="font-size:10px;font-weight:700;color:${ci.color};">${ci.label}</div></td></tr>`;}).join('');
+  const tot=MEMBERS.reduce((a,m)=>{const d=getMData(m.id);a.spend+=d.spend||0;a.orders+=d.totalOrders||0;a.del+=d.deliveredOrders||0;a.sumT+=d.sumTahseel||0;a.aqT+=d.avgQtyTotal||0;a.aqD+=d.avgQtyDelivered||0;return a;},{spend:0,orders:0,del:0,sumT:0,aqT:0,aqD:0});
+  const n=MEMBERS.length,totCpa=tot.orders>0?tot.spend/tot.orders:0,totAvgT=tot.del>0?tot.sumT/tot.del:0,tci=cpaInfo(totCpa);
+  const sumItems=[
+    {label:'Spend (TikTok)',val:`$${tot.spend.toLocaleString()}`,color:'#ff2d7a',sc:'sc-pink'},
+    {label:'Total Orders',val:tot.orders,color:'#00d4ff',sc:'sc-cyan'},
+    {label:'Avg Qty (Total)',val:(tot.aqT/n).toFixed(2),color:'#4f9ef8',sc:'sc-blue'},
+    {label:`CPA · ${tci.label}`,val:`$${totCpa.toFixed(2)}`,color:tci.color,sc:'sc-purple'},
+    {label:'Delivered Orders',val:tot.del,color:'#22d36e',sc:'sc-green'},
+    {label:'Avg Qty (Del.)',val:(tot.aqD/n).toFixed(2),color:'#fb7185',sc:'sc-rose'},
+    {label:'Sum المطلوب تحصيله',val:`﷼${tot.sumT.toLocaleString()}`,color:'#f7931e',sc:'sc-yellow'},
+    {label:'Avg المطلوب تحصيله',val:`﷼${totAvgT.toFixed(2)}`,color:'#00d4a8',sc:'sc-teal'},
+  ].map(c=>`<div class="sum-card ${c.sc}"><div class="stat-label">${c.label}</div><div style="font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:600;color:${c.color};">${c.val}</div></div>`).join('');
+  return`<div style="padding:28px 32px;">
+    <div style="display:inline-flex;align-items:center;gap:6px;background:#00d4ff12;border:1px solid #00d4ff28;border-radius:999px;padding:4px 12px;font-size:11px;font-weight:700;color:var(--cyan);letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;"><span style="width:6px;height:6px;border-radius:50%;background:var(--cyan);display:inline-block;"></span>ALL USERS SELECTED</div>
+    <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:22px;margin-bottom:4px;">Team Dashboard — A's Team</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:18px;">Performance breakdown per member · ${dashDate}</div>
+    <div class="table-wrap" style="margin-bottom:14px;">
+      <div class="table-head-bar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--pink)" stroke-width="2.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><h3>Performance Breakdown (Per Person)</h3></div>
+      <table><thead><tr><th>#</th><th>Person</th><th>Spend (TikTok)</th><th>Total Orders</th><th>Avg Qty (Total)</th><th>CPA</th><th>Delivered</th><th>Avg Qty (Del.)</th><th>Sum تحصيله</th><th>Avg تحصيله</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--pink)" stroke-width="2.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span style="font-family:'Syne',sans-serif;font-weight:700;font-size:14px;">TOTAL SUMMARY</span><span style="background:#ff2d7a18;border:1px solid #ff2d7a33;border-radius:999px;padding:3px 10px;font-size:11px;font-weight:700;color:var(--pink);">5 People Combined</span></div>
+    <div style="display:grid;grid-template-columns:repeat(8,1fr);gap:10px;margin-bottom:10px;">${sumItems}</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;"><span style="font-size:11px;color:var(--text3);">Last updated: ${dashDate}</span><span style="color:var(--cyan);cursor:pointer;font-weight:600;font-size:11px;" onclick="buildDashContent()">↺ Refresh</span></div>
+  </div>`;
+}
+
+// ── CHARTS ──
+function drawSpark(c,data,color){
+  if(!c)return;const W=c.offsetWidth||180,H=32;c.width=W;c.height=H;
+  const ctx=c.getContext('2d'),mn=Math.min(...data),mx=Math.max(...data),rng=mx-mn||1,p=2;
+  const pts=data.map((v,i)=>({x:p+i/(data.length-1)*(W-p*2),y:H-p-(v-mn)/rng*(H-p*2)}));
+  const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,color+'40');g.addColorStop(1,color+'00');
+  ctx.beginPath();ctx.moveTo(pts[0].x,H);for(const pt of pts)ctx.lineTo(pt.x,pt.y);ctx.lineTo(pts[pts.length-1].x,H);ctx.closePath();ctx.fillStyle=g;ctx.fill();
+  ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x,pts[i].y);ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.stroke();
+}
+const SPARK_DATA=[['sp1','#ff2d7a',[80,120,95,160,140,200,180]],['sp2','#00d4ff',[5,8,10,9,12,11,15]],['sp3','#a78bfa',[25,22,24,21,23,20,21]],['sp4','#22d36e',[4,7,8,8,10,10,12]],['sp5','#f7931e',[300,450,520,600,700,900,1200]],['sp6','#00d4a8',[70,72,75,78,79,80,80]],['sp7','#4f9ef8',[2.1,2.3,2.2,2.4,2.5,2.4,2.46]],['sp8','#fb7185',[2.0,2.1,2.2,2.3,2.4,2.3,2.33]]];
+function initSparks(){SPARK_DATA.forEach(([id,c,d])=>drawSpark(document.getElementById(id),d,c));}
+
+const TREND_DATA={spend:{data:[180,220,260,190,280,310],color:'#ff2d7a'},orders:{data:[8,10,12,9,13,15],color:'#00d4ff'},cpa:{data:[22.5,22,21.7,21.1,21.5,20.7],color:'#a78bfa'}};
+const TLABELS=['D1','D2','D3','D4','D5','D6'];
+function drawTrend(metric){
+  const canvas=document.getElementById('trendChart');if(!canvas)return;
+  const W=canvas.offsetWidth||380,H=100;canvas.width=W;canvas.height=H;
+  const ctx=canvas.getContext('2d');ctx.clearRect(0,0,W,H);
+  const d=TREND_DATA[metric||'spend'];
+  const mn=Math.min(...d.data)*0.9,mx=Math.max(...d.data)*1.05,rng=mx-mn||1;
+  const pad={l:8,r:8,t:6,b:20};
+  const pts=d.data.map((v,i)=>({x:pad.l+i/(d.data.length-1)*(W-pad.l-pad.r),y:pad.t+(1-(v-mn)/rng)*(H-pad.t-pad.b)}));
+  [0.33,0.66].forEach(f=>{const y=pad.t+f*(H-pad.t-pad.b);ctx.strokeStyle='#ffffff08';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();});
+  const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,d.color+'30');g.addColorStop(1,d.color+'00');
+  ctx.beginPath();ctx.moveTo(pts[0].x,H-pad.b);for(const p of pts)ctx.lineTo(p.x,p.y);ctx.lineTo(pts[pts.length-1].x,H-pad.b);ctx.closePath();ctx.fillStyle=g;ctx.fill();
+  ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x,pts[i].y);ctx.strokeStyle=d.color;ctx.lineWidth=2;ctx.stroke();
+  pts.forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,3,0,Math.PI*2);ctx.fillStyle=d.color;ctx.fill();});
+  ctx.fillStyle='#555a75';ctx.font='9px DM Sans';ctx.textAlign='center';
+  TLABELS.forEach((l,i)=>ctx.fillText(l,pad.l+i/(TLABELS.length-1)*(W-pad.l-pad.r),H-5));
+}
+
+// ── BOOT — Fast splash: 0.8s total (was 2s) ──
+window.addEventListener('DOMContentLoaded',async()=>{
+  const bar=document.getElementById('splashBar');
+  const label=document.getElementById('splashLabel');
+
+  // PERF: Fire config check immediately in parallel with animations
+  const configPromise=window.api.hasConfig();
+
+  // Animate bar to 80% right away
+  if(bar){bar.style.transition='width .4s ease';bar.style.width='80%';}
+
+  let li=0;const lbls=['Loading...','Checking config...','Ready ✦'];
+  const lt=setInterval(()=>{li++;if(label&&li<lbls.length)label.textContent=lbls[li];},220);
+
+  // Wait for config (the only real async work)
+  const hasConfig=await configPromise;
+  clearInterval(lt);
+  if(label)label.textContent='Ready ✦';
+  if(bar){bar.style.transition='width .15s ease';bar.style.width='100%';}
+
+  // Tiny pause to show 100% bar, then enter app immediately
+  setTimeout(()=>{
+    const splash=document.getElementById('splash');
+    splash.classList.add('hiding');
+    setTimeout(()=>{
+      splash.style.display='none';
+      document.getElementById('shell').style.display='flex';
+      navigate(hasConfig?'execution':'setup');
+    },280);
+  },160);
+});
+</script>
+</body>
+</html>
