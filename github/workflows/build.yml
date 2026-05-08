@@ -1,0 +1,103 @@
+name: Build — Mac & Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # ── macOS — Intel (x64) ──────────────────────────────────
+  build-mac-x64:
+    name: Build macOS DMG (x64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+
+      - name: Build DMG (x64)
+        run: npx electron-builder --mac --x64
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_BUILDER_PUBLISH: never
+
+      - name: Upload Mac x64 artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.zip
+
+  # ── macOS — Apple Silicon (arm64) ───────────────────────
+  build-mac-arm64:
+    name: Build macOS DMG (arm64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+
+      - name: Build DMG (arm64)
+        run: npx electron-builder --mac --arm64
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_BUILDER_PUBLISH: never
+
+      - name: Upload Mac arm64 artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.zip
+
+  # ── Windows — x64 installer + portable ──────────────────
+  build-win:
+    name: Build Windows EXE
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+
+      - name: Build Windows installer + portable
+        run: npm run dist:win
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_BUILDER_PUBLISH: never
+
+      - name: Upload Windows artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
