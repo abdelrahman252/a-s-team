@@ -21,8 +21,8 @@
     "asar": true,
     "publish": {
       "provider": "github",
-      "owner": "YOUR_GITHUB_USERNAME",
-      "repo": "YOUR_REPO_NAME",
+      "owner": "abdelrahman252",
+      "repo": "a-s-team",
       "releaseType": "release"
     },
     "files": [
@@ -39,8 +39,12 @@
       "category": "public.app-category.business",
       "icon": "assets/icon.icns",
       "target": [
-        { "target": "dmg" },
-        { "target": "zip" }
+        {
+          "target": "dmg"
+        },
+        {
+          "target": "zip"
+        }
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
@@ -50,8 +54,18 @@
     "win": {
       "icon": "assets/icon.ico",
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "requestedExecutionLevel": "asInvoker"
     },
@@ -69,14 +83,29 @@
     "dmg": {
       "title": "A's Team Dashboard",
       "background": null,
-      "window": { "width": 540, "height": 380 },
+      "window": {
+        "width": 540,
+        "height": 380
+      },
       "contents": [
-        { "x": 130, "y": 220, "type": "file" },
-        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 220,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "extraResources": [
-      { "from": "assets", "to": "assets" }
+      {
+        "from": "assets",
+        "to": "assets"
+      }
     ]
   },
   "dependencies": {
