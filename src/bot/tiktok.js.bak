@@ -3,22 +3,32 @@
 /**
  * tiktok.js — TikTok Ads spend scraper
  *
- * SHADOW DOM STRATEGY — NO SUFFIX SELECTORS EVER:
- * ─────────────────────────────────────────────────
- *  TikTok's component suffix (e.g. -1-1-14, -1-1-19) changes between accounts
- *  and deployments. ALL selectors use suffix-free approaches only:
- *    • data-testid attributes
- *    • CSS class names (.date-grid-body__date-item, .picker-core__popup-footer-append etc.)
- *    • tag name PATTERNS (el.tagName.toLowerCase().includes("display-field"))
- *    • icon tag names (ks-icon-chevron-right — icons have NO suffix, they are stable)
- *    • [class*='KsButton'] partial class match
- *    • text content ("Confirm")
+ * KEY BEHAVIOUR (shared login):
+ * ─────────────────────────────
+ *  • All TikTok accounts share ONE login (same Ads Manager account).
+ *  • Chrome is launched ONCE per bot run and kept open across all members.
+ *  • Login is confirmed ONCE at the start of the run. If the session is already
+ *    saved (persistent profile), it skips straight to scraping.
+ *  • If TikTok redirects to the login page mid-run (session expired / no-permission),
+ *    the bot detects it, waits for the user to log in again, then resumes.
+ *  • Chrome is closed only after ALL members are processed.
  *
- * CALENDAR LAYOUT:
- *  Dual-panel picker — LEFT shows earlier month, RIGHT shows later month.
- *  LEFT panel:  .date-grid-header__controls (visible ←), --hidden class on right controls
- *  RIGHT panel: .date-grid-header__controls (visible →), --hidden class on left controls
- *  Always click the arrow inside a NON-hidden controls group.
+ * ALL elements are inside nested Shadow DOM — must use page.evaluate() to reach them.
+ * Component suffix is "-1-1-19" (all selectors include "-1-1-14" as fallback).
+ *
+ * CALENDAR LAYOUT: The picker shows TWO side-by-side months (left=earlier, right=later).
+ * - LEFT panel:  visible ← controls, RIGHT controls have class --hidden
+ * - RIGHT panel: visible → controls, LEFT controls have class --hidden
+ * - To navigate FORWARD: click → on the RIGHT panel (the one WITHOUT --hidden on its right controls).
+ * - To navigate BACKWARD: click ← on the LEFT panel (the one WITHOUT --hidden on its left controls).
+ *
+ * Flow per account:
+ *   1. Navigate to clean campaign URL
+ *   2. Detect & recover session if redirected to login page
+ *   3. Click the date picker trigger (ks-date-time-picker-display-field-1-1-19)
+ *   4. Set date range — click FROM day, click TO day
+ *   5. Click Confirm (ks-button-1-1-19[data-testid="core-index-g1HneZ"])
+ *   6. Wait for table, read spend from div[slot="footer-stat_cost"]
  */
 
 const { launchChrome, closeChrome } = require("./browser");
@@ -37,30 +47,50 @@ function parseSpend(text) {
 }
 
 // ════════════════════════════════════════════════════════
-// SHARED CHROME STATE + MUTEX
+// SHARED CHROME STATE
+// One context + page is opened at the start of a run and
+// reused across all members. Closed once at the end.
+//
+// MUTEX: because members now run in parallel we need to
+// serialise access to the shared page.  A simple promise-
+// chain mutex is enough — no external deps needed.
 // ════════════════════════════════════════════════════════
 
 let _sharedContext = null;
 let _sharedPage    = null;
+
+// Lightweight async mutex — each caller waits for the previous one to finish.
 let _tiktokMutexTail = Promise.resolve();
 
+/**
+ * Acquire the shared-page lock, run fn(), then release.
+ * This ensures only one member uses the shared TikTok page at a time.
+ */
 async function withTiktokLock(fn) {
   let release;
   const acquired = new Promise(res => { release = res; });
+  // Queue: wait for the previous holder to finish, then run
   const previous = _tiktokMutexTail;
   _tiktokMutexTail = previous.then(() => acquired);
-  await previous;
-  try { return await fn(); } finally { release(); }
+  await previous;       // wait our turn
+  try {
+    return await fn();
+  } finally {
+    release();          // hand off to the next waiter
+  }
 }
 
+/** Call once before any members are processed. */
 async function initSharedChrome(onLog, launchMinimized) {
-  if (_sharedContext && _sharedPage) return;
+  if (_sharedContext && _sharedPage) return; // already open
+  // Reset the mutex for a fresh run
   _tiktokMutexTail = Promise.resolve();
   const { context, page } = await launchChrome(onLog, "tiktok-shared", launchMinimized);
   _sharedContext = context;
   _sharedPage    = page;
 }
 
+/** Call once after all members are processed. */
 async function closeSharedChrome(onLog) {
   if (_sharedContext) {
     await closeChrome(_sharedContext, onLog);
@@ -74,72 +104,126 @@ async function closeSharedChrome(onLog) {
 // ════════════════════════════════════════════════════════
 
 function isLoginUrl(url) {
-  if (!url || url === "about:blank" || url.startsWith("chrome://")) return false;
-  return url.includes("/login") || url.includes("/auth") ||
-         url.includes("redirect=") || !url.includes("ads.tiktok.com");
+  return (
+    url.includes("/login") ||
+    url.includes("/auth")  ||
+    url.includes("redirect=") ||
+    !url.includes("ads.tiktok.com")
+  );
 }
 
+/**
+ * Ensure TikTok session is active.
+ * If we're on a login page, wait for the user to log in (up to 10 min).
+ * Returns true when session is confirmed.
+ */
 async function ensureSession(page, onLog, contextLabel) {
-  if (!isLoginUrl(page.url())) return true;
-  lg(onLog, "warn", `⚠️ [${contextLabel}] Session expired — on login page`);
-  lg(onLog, "warn", `👆 [${contextLabel}] Please log in (up to 10 min)...`);
+  const url = page.url();
+  if (!isLoginUrl(url)) return true; // already logged in
+
+  lg(onLog, "warn", `⚠️ [${contextLabel}] Session expired or not logged in — on login page`);
+  lg(onLog, "warn", `👆 [${contextLabel}] Please log in to TikTok Ads in the browser window (up to 10 min)...`);
+
   const deadline = Date.now() + 10 * 60 * 1000;
   while (Date.now() < deadline) {
     await page.waitForTimeout(1500);
-    if (!isLoginUrl(page.url())) {
+    const u = page.url();
+    if (!isLoginUrl(u)) {
       lg(onLog, "ok", `✅ [${contextLabel}] Login confirmed — resuming`);
       return true;
     }
   }
-  throw new Error(`[${contextLabel}] TikTok login timeout`);
+  throw new Error(`[${contextLabel}] TikTok login timeout — session could not be confirmed`);
 }
 
+/**
+ * One-time login check at the start of the run.
+ * Navigates to the login URL to see if session is already saved.
+ */
 async function confirmInitialLogin(page, onLog) {
   lg(onLog, "info", "🔑 Checking TikTok session...");
-  // Navigate to the ads dashboard — if session is alive it stays there,
-  // if expired TikTok redirects us to the login page.
-  await page.goto("https://ads.tiktok.com/i18n/dashboard", { waitUntil: "domcontentloaded", timeout: 30000 });
-  await page.waitForTimeout(1500);
-  if (!isLoginUrl(page.url())) {
-    lg(onLog, "ok", "✅ Already logged in — skipping login");
+  await page.goto(TT_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.waitForTimeout(800);
+
+  const url = page.url();
+  if (!isLoginUrl(url)) {
+    lg(onLog, "ok", "✅ Already logged in (saved session) — skipping login");
     return;
   }
+
+  // Need to log in
   await ensureSession(page, onLog, "initial login");
 }
 
 // ════════════════════════════════════════════════════════
-// OPEN DATE PICKER — suffix-free
+// SHADOW DOM HELPERS
 // ════════════════════════════════════════════════════════
 
+async function evalShadow(page, finderFn) {
+  return page.evaluate((fnStr) => {
+    const fn = new Function("root", fnStr);
+    function walk(root) {
+      const r = fn(root);
+      if (r) return r;
+      for (const el of root.querySelectorAll("*")) {
+        if (el.shadowRoot) {
+          const r2 = walk(el.shadowRoot);
+          if (r2) return r2;
+        }
+      }
+      return null;
+    }
+    return walk(document);
+  }, finderFn);
+}
+
+// ── OPEN DATE PICKER ──
 async function openDatePicker(page, onLog) {
   lg(onLog, "info", "   🗓️  Opening date picker...");
 
-  // Try 1: any element whose tag name contains "display-field" → click its shadow button
   let clicked = await page.evaluate(() => {
     function walk(root) {
-      for (const el of root.querySelectorAll("*")) {
-        if (el.tagName && el.tagName.toLowerCase().includes("display-field") && el.shadowRoot) {
-          const btn = el.shadowRoot.querySelector("button");
+      const fields = root.querySelectorAll("[class*='KsDateRangePicker'] ks-date-time-picker-display-field-1-1-19, ks-date-time-picker-display-field-1-1-19, ks-date-time-picker-display-field-1-1-14");
+      for (const f of fields) {
+        if (f.shadowRoot) {
+          const btn = f.shadowRoot.querySelector("button");
           if (btn) { btn.click(); return true; }
         }
+      }
+      for (const el of root.querySelectorAll("*")) {
         if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
       }
       return false;
     }
     return walk(document);
   });
-  lg(onLog, "info", `   🗓️  Try 1 (display-field tag): ${clicked}`);
+  lg(onLog, "info", `   🗓️  Try 1 result: ${clicked}`);
 
-  // Try 2: data-testid containing "display-field"
   if (!clicked) {
     clicked = await page.evaluate(() => {
       function walk(root) {
-        for (const el of root.querySelectorAll("[data-testid*='display-field']")) {
-          if (el.shadowRoot) {
+        for (const el of root.querySelectorAll("*")) {
+          if (el.tagName && el.tagName.toLowerCase().includes("display-field") && el.shadowRoot) {
             const btn = el.shadowRoot.querySelector("button");
             if (btn) { btn.click(); return true; }
           }
-          el.click(); return true;
+          if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
+        }
+        return false;
+      }
+      return walk(document);
+    });
+    lg(onLog, "info", `   🗓️  Try 2 result: ${clicked}`);
+  }
+
+  if (!clicked) {
+    clicked = await page.evaluate(() => {
+      function walk(root) {
+        for (const el of root.querySelectorAll("button, div[class*='display-field']")) {
+          const t = el.textContent || "";
+          if (/Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/.test(t) && t.length < 40) {
+            el.click(); return true;
+          }
         }
         for (const el of root.querySelectorAll("*")) {
           if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
@@ -148,38 +232,16 @@ async function openDatePicker(page, onLog) {
       }
       return walk(document);
     });
-    lg(onLog, "info", `   🗓️  Try 2 (display-field testid): ${clicked}`);
+    lg(onLog, "info", `   🗓️  Try 3 result: ${clicked}`);
   }
 
-  // Try 3: shadow button whose text contains a month name (date display)
   if (!clicked) {
     clicked = await page.evaluate(() => {
-      function walk(root) {
-        for (const el of root.querySelectorAll("*")) {
-          if (el.shadowRoot) {
-            const btn = el.shadowRoot.querySelector("button");
-            if (btn && /Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/.test(btn.textContent || "") && (btn.textContent || "").length < 60) {
-              btn.click(); return true;
-            }
-            const r = walk(el.shadowRoot);
-            if (r) return r;
-          }
-        }
-        return false;
-      }
-      return walk(document);
-    });
-    lg(onLog, "info", `   🗓️  Try 3 (shadow month-text button): ${clicked}`);
-  }
-
-  // Try 4: element with class containing "picker" 
-  if (!clicked) {
-    clicked = await page.evaluate(() => {
-      const el = document.querySelector("[class*='picker--'], [class*='KsDateRange']");
+      const el = document.querySelector("[class*='picker--']");
       if (el) { el.click(); return true; }
       return false;
     });
-    lg(onLog, "info", `   🗓️  Try 4 (picker class): ${clicked}`);
+    lg(onLog, "info", `   🗓️  Try 4 result: ${clicked}`);
   }
 
   await page.waitForTimeout(300);
@@ -195,14 +257,11 @@ async function openDatePicker(page, onLog) {
     return walk(document);
   });
   lg(onLog, calOpen ? "ok" : "warn", `   🗓️  Calendar open: ${calOpen}`);
+
   return calOpen;
 }
 
-// ════════════════════════════════════════════════════════
-// GET CURRENT MONTH/YEAR — reads LEFT panel label buttons
-// Uses only stable class names
-// ════════════════════════════════════════════════════════
-
+// ── GET CURRENT MONTH/YEAR ──
 async function getCurrentMonthYear(page) {
   return page.evaluate(() => {
     const MONTHS = ["January","February","March","April","May","June",
@@ -224,13 +283,7 @@ async function getCurrentMonthYear(page) {
   });
 }
 
-// ════════════════════════════════════════════════════════
-// NAVIGATE TO TARGET MONTH
-// Uses: tag name pattern for header elements, stable class names for control groups,
-//       ks-icon-chevron-left/right (icon tags have NO suffix — stable),
-//       [class*='KsIconButton'] for the button wrapper
-// ════════════════════════════════════════════════════════
-
+// ── NAVIGATE TO TARGET MONTH ──
 async function navigateToMonth(page, targetYear, targetMonth, onLog) {
   for (let i = 0; i < 24; i++) {
     const cur = await getCurrentMonthYear(page);
@@ -243,56 +296,45 @@ async function navigateToMonth(page, targetYear, targetMonth, onLog) {
     const goBack      = targetTotal < curTotal;
 
     const moved = await page.evaluate((goBack) => {
-      const iconTag = goBack ? "ks-icon-chevron-left" : "ks-icon-chevron-right";
+      // The picker shows TWO calendar panels side-by-side.
+      // LEFT panel:  has visible ← (go back) controls, RIGHT controls are hidden.
+      // RIGHT panel: has visible → (go forward) controls, LEFT controls are hidden.
+      // We must click the arrow on the panel whose controls are NOT hidden.
+      // Strategy: collect all ks-icon-button-* that wrap the target icon AND whose
+      // parent .date-grid-header__controls does NOT have --hidden class.
 
-      // Find the shadow root of a header element, then find a VISIBLE control group
-      // containing the target icon, then click its button wrapper.
-      function tryInHeaderShadow(shadow) {
-        const groups = shadow.querySelectorAll(".date-grid-header__controls");
-        for (const group of groups) {
-          // Skip hidden groups — this is the key fix for dual-panel layout
-          if (group.classList.contains("date-grid-header__controls--hidden")) continue;
-          const icon = group.querySelector(iconTag);
-          if (!icon) continue;
-          // The icon is inside a wrapper whose tag we don't know (suffix varies).
-          // Find by class attribute partial match — [class*='KsIconButton'] is stable.
-          const wrapper = icon.closest("[class*='KsIconButton']");
-          if (wrapper && wrapper.shadowRoot) {
-            const btn = wrapper.shadowRoot.querySelector("button");
-            if (btn) { btn.click(); return true; }
-          }
-          // Fallback: walk up to find any ancestor with a shadowRoot containing a button
-          let node = icon.parentElement;
-          while (node) {
-            if (node.shadowRoot) {
-              const btn = node.shadowRoot.querySelector("button");
+      function tryClickVisibleArrow(root) {
+        // Find all date-grid-header elements (they sit in shadow roots of ks-date-time-picker-date-grid-header-*)
+        const headers = root.querySelectorAll("[class*='date-grid__header'], ks-date-time-picker-date-grid-header-1-1-19, ks-date-time-picker-date-grid-header-1-1-14");
+        for (const header of headers) {
+          const sr = header.shadowRoot;
+          if (!sr) continue;
+          // Each header shadow has .date-grid-header__controls divs (one left, one right)
+          const controlGroups = sr.querySelectorAll(".date-grid-header__controls");
+          for (const group of controlGroups) {
+            // Skip hidden control groups
+            if (group.classList.contains("date-grid-header__controls--hidden")) continue;
+            // Look for the icon we want inside this visible group
+            const iconTag = goBack ? "ks-icon-chevron-left" : "ks-icon-chevron-right";
+            const icon = group.querySelector(iconTag);
+            if (!icon) continue;
+            // Click the ks-icon-button wrapper's inner shadow button
+            const iconBtn = icon.closest("ks-icon-button-1-1-19") || icon.closest("ks-icon-button-1-1-14") || icon.closest("[class*='KsIconButton']");
+            if (iconBtn && iconBtn.shadowRoot) {
+              const btn = iconBtn.shadowRoot.querySelector("button");
               if (btn) { btn.click(); return true; }
             }
-            node = node.parentElement;
+            // Fallback: click the icon itself
+            icon.click(); return true;
           }
-          // Last resort: click the icon element itself
-          icon.click(); return true;
         }
-        return false;
-      }
-
-      // Single-pass recursive walk: for every element, if it's a date-grid-header
-      // try clicking its shadow arrow; ALSO recurse into its shadow root either way
-      // so nothing buried deeper gets missed.
-      function walk(root) {
+        // Recurse into shadow roots we haven't visited yet
         for (const el of root.querySelectorAll("*")) {
-          if (el.tagName && el.tagName.toLowerCase().includes("date-grid-header") && el.shadowRoot) {
-            if (tryInHeaderShadow(el.shadowRoot)) return true;
-            // Still recurse in case headers are nested (shouldn't happen but safe)
-            if (walk(el.shadowRoot)) return true;
-          } else if (el.shadowRoot) {
-            if (walk(el.shadowRoot)) return true;
-          }
+          if (el.shadowRoot) { const r = tryClickVisibleArrow(el.shadowRoot); if (r) return r; }
         }
         return false;
       }
-
-      return walk(document);
+      return tryClickVisibleArrow(document);
     }, goBack);
 
     lg(onLog, "info", `   🗓️  Navigate ${goBack ? "←" : "→"}: ${moved}`);
@@ -300,21 +342,16 @@ async function navigateToMonth(page, targetYear, targetMonth, onLog) {
   }
 }
 
-// ════════════════════════════════════════════════════════
-// CLICK A SPECIFIC DAY
-// Uses: .date-grid-body__date-item class, data-testid suffix match, text content
-// ════════════════════════════════════════════════════════
-
+// ── CLICK A SPECIFIC DAY ──
 async function clickDay(page, day, targetMonth, targetYear, onLog) {
   const dayStr = String(day);
   lg(onLog, "info", `   🗓️  Clicking day ${dayStr} (${MONTH_NAMES[targetMonth]} ${targetYear})...`);
 
-  // Try 1: class-based, text match, not outside current period
   let clicked = await page.evaluate((dayStr) => {
     function walk(root) {
       const items = root.querySelectorAll(".date-grid-body__date-item");
       for (const item of items) {
-        const t   = item.textContent.trim();
+        const t = item.textContent.trim();
         const cls = item.className || "";
         if (t === dayStr && !cls.includes("outside-current-period")) {
           item.click(); return true;
@@ -327,9 +364,8 @@ async function clickDay(page, day, targetMonth, targetYear, onLog) {
     }
     return walk(document);
   }, dayStr);
-  lg(onLog, "info", `   🗓️  Day click try 1 (class+text): ${clicked}`);
+  lg(onLog, "info", `   🗓️  Day click try 1 (class match): ${clicked}`);
 
-  // Try 2: data-testid ending with the day number
   if (!clicked) {
     clicked = await page.evaluate((dayStr) => {
       function walk(root) {
@@ -354,114 +390,87 @@ async function clickDay(page, day, targetMonth, targetYear, onLog) {
   return clicked;
 }
 
-// ════════════════════════════════════════════════════════
-// CLICK CONFIRM
+// ── CLICK CONFIRM ──
 //
-// From HTML: .picker-core__popup-footer > .picker-core__popup-footer-append
-//              [class*='KsButton'][data-testid="core-index-xpDLeJ"] = Cancel  (first)
-//              [class*='KsButton'][data-testid="core-index-g1HneZ"] = Confirm (last)
-//                shadowRoot > <button>Confirm</button>
+// The Confirm button lives here (from actual HTML inspection):
+//   .picker-core__popup-footer
+//     .picker-core__popup-footer-append
+//       ks-button-1-1-19[data-testid="core-index-g1HneZ"]  ← Confirm
+//         <template shadowrootmode="open">
+//           <button class="button button--sm button--type-contained button--color-primary">
 //
-// RULES: NEVER click by suffix tag. NEVER click page-level buttons.
-//        ALWAYS stay scoped inside .picker-core__popup-footer-append or .picker-core__popup.
-// ════════════════════════════════════════════════════════
-
+// RULES:
+//  - NEVER click page-level buttons or "last button" fallbacks — they hit "Create Campaign".
+//  - All tries must stay inside .picker-core__popup-footer-append or the picker popup.
+//  - Try by testid first, then by text content "Confirm" inside the footer only.
+//
 async function clickConfirm(page, onLog) {
   lg(onLog, "info", "   🗓️  Clicking Confirm...");
 
-  // Helper: find .picker-core__popup-footer-append by walking all shadow roots
-  // This is the stable container — class name never changes.
-  function findFooterAppend(root) {
-    const el = root.querySelector(".picker-core__popup-footer-append");
-    if (el) return el;
-    for (const c of root.querySelectorAll("*")) {
-      if (c.shadowRoot) { const r = findFooterAppend(c.shadowRoot); if (r) return r; }
-    }
-    return null;
-  }
-
-  // Helper: given a footer element, click the element whose shadow/text says "Confirm".
-  // Never clicks by position alone without a text check.
-  function clickConfirmInFooter(footer) {
-    // Collect all direct children that could be buttons (any tag with KsButton class)
-    const candidates = [...footer.querySelectorAll("[class*='KsButton']")];
-    for (const el of candidates) {
-      if ((el.textContent || "").trim() === "Confirm") {
-        const btn = el.shadowRoot ? el.shadowRoot.querySelector("button") : null;
-        if (btn) { btn.click(); return "ksbutton-shadow"; }
-        el.click(); return "ksbutton-host";
-      }
-    }
-    // Also check plain <button> elements (in case shadow not used)
-    for (const btn of footer.querySelectorAll("button")) {
-      if ((btn.textContent || "").trim() === "Confirm") { btn.click(); return "plain-button"; }
-    }
-    return null;
-  }
-
-  // Try 1: footer-append → any KsButton/button with text "Confirm"
+  // ── Try 1: exact testid "core-index-g1HneZ" — works when suffix is -1-1-19 ──
   let clicked = await page.evaluate(() => {
-    function findFooter(root) {
+    function walk(root) {
+      // Try both known suffixes in case TikTok rolls back
+      const selectors = [
+        'ks-button-1-1-19[data-testid="core-index-g1HneZ"]',
+        'ks-button-1-1-14[data-testid="core-index-g1HneZ"]',
+      ];
+      for (const sel of selectors) {
+        const host = root.querySelector(sel);
+        if (host) {
+          // Button is inside shadow root via <template shadowrootmode>
+          const btn = host.shadowRoot?.querySelector("button");
+          if (btn) { btn.click(); return `testid-shadow-${sel}`; }
+          // Shadow not attached yet — click the host element itself
+          host.click(); return `testid-host-${sel}`;
+        }
+      }
+      for (const el of root.querySelectorAll("*")) {
+        if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
+      }
+      return null;
+    }
+    return walk(document);
+  });
+  lg(onLog, "info", `   🗓️  Confirm try 1 (testid): ${clicked}`);
+  if (clicked) { await page.waitForTimeout(500); return; }
+
+  // ── Try 2: find .picker-core__popup-footer-append, click ks-button whose text is "Confirm" ──
+  clicked = await page.evaluate(() => {
+    function findFooterAppend(root) {
       const el = root.querySelector(".picker-core__popup-footer-append");
       if (el) return el;
       for (const c of root.querySelectorAll("*")) {
-        if (c.shadowRoot) { const r = findFooter(c.shadowRoot); if (r) return r; }
+        if (c.shadowRoot) { const r = findFooterAppend(c.shadowRoot); if (r) return r; }
       }
       return null;
     }
-    const footer = findFooter(document);
+    const footer = findFooterAppend(document);
     if (!footer) return "no-footer";
-    for (const el of footer.querySelectorAll("[class*='KsButton']")) {
-      if ((el.textContent || "").trim() === "Confirm") {
-        const btn = el.shadowRoot ? el.shadowRoot.querySelector("button") : null;
-        if (btn) { btn.click(); return "ksbutton-shadow"; }
-        el.click(); return "ksbutton-host";
+    // Walk ks-button-* inside the footer append div
+    const ksButtons = footer.querySelectorAll(
+      "ks-button-1-1-19, ks-button-1-1-14, ks-button-91z, [class*='KsButton']"
+    );
+    for (const kb of ksButtons) {
+      const label = (kb.textContent || "").trim();
+      if (label === "Confirm") {
+        const btn = kb.shadowRoot?.querySelector("button");
+        if (btn) { btn.click(); return "footer-ksbutton-shadow"; }
+        kb.click(); return "footer-ksbutton-host";
       }
     }
-    for (const btn of footer.querySelectorAll("button")) {
-      if ((btn.textContent || "").trim() === "Confirm") { btn.click(); return "plain-button"; }
+    // Also try plain <button> with text Confirm inside footer
+    const plainBtns = footer.querySelectorAll("button");
+    for (const b of plainBtns) {
+      if ((b.textContent || "").trim() === "Confirm") { b.click(); return "footer-plain-button"; }
     }
     return null;
   });
-  lg(onLog, "info", `   🗓️  Confirm try 1 (footer-append + text Confirm): ${clicked}`);
-  if (clicked && clicked !== "no-footer") { await page.waitForTimeout(500); return; }
+  lg(onLog, "info", `   🗓️  Confirm try 2 (footer-append text): ${clicked}`);
+  if (clicked && clicked !== "no-footer" && clicked !== "null") { await page.waitForTimeout(500); return; }
 
-  // Try 2: find .picker-core__popup, walk its entire subtree (including shadow roots)
-  //         for any element with text "Confirm" — scoped so we never leave the popup
-  clicked = await page.evaluate(() => {
-    function findPopup(root) {
-      const el = root.querySelector(".picker-core__popup");
-      if (el) return el;
-      for (const c of root.querySelectorAll("*")) {
-        if (c.shadowRoot) { const r = findPopup(c.shadowRoot); if (r) return r; }
-      }
-      return null;
-    }
-    function findConfirm(root) {
-      for (const el of root.querySelectorAll("[class*='KsButton']")) {
-        if ((el.textContent || "").trim() === "Confirm") {
-          const btn = el.shadowRoot ? el.shadowRoot.querySelector("button") : null;
-          if (btn) { btn.click(); return "popup-ksbutton-shadow"; }
-          el.click(); return "popup-ksbutton-host";
-        }
-      }
-      for (const btn of root.querySelectorAll("button")) {
-        if ((btn.textContent || "").trim() === "Confirm") { btn.click(); return "popup-plain-btn"; }
-      }
-      for (const c of root.querySelectorAll("*")) {
-        if (c.shadowRoot) { const r = findConfirm(c.shadowRoot); if (r) return r; }
-      }
-      return null;
-    }
-    const popup = findPopup(document);
-    if (!popup) return "no-popup";
-    return findConfirm(popup);
-  });
-  lg(onLog, "info", `   🗓️  Confirm try 2 (picker-popup text walk): ${clicked}`);
-  if (clicked && clicked !== "no-popup") { await page.waitForTimeout(500); return; }
-
-  // Try 3: walk ALL shadow roots globally, find any [class*='KsButton'] with text "Confirm",
-  //         verify it sits inside the picker popup by climbing the shadow host chain
+  // ── Try 3: walk ALL shadow roots, find any ks-button whose text is Confirm,
+  //           but ONLY if it's inside a .picker-core__popup ancestor ──
   clicked = await page.evaluate(() => {
     function insidePickerPopup(el) {
       let node = el;
@@ -471,17 +480,64 @@ async function clickConfirm(page, onLog) {
           node.classList.contains("picker-core__popup-footer") ||
           node.classList.contains("picker-core__popup-footer-append")
         )) return true;
-        node = node.parentElement || (node.getRootNode ? node.getRootNode().host : null);
+        node = node.parentElement || (node.getRootNode && node.getRootNode().host);
       }
       return false;
     }
     function walk(root) {
-      for (const el of root.querySelectorAll("[class*='KsButton']")) {
-        if ((el.textContent || "").trim() !== "Confirm") continue;
-        if (!insidePickerPopup(el)) continue;
-        const btn = el.shadowRoot ? el.shadowRoot.querySelector("button") : null;
-        if (btn) { btn.click(); return "global-scoped-shadow"; }
-        el.click(); return "global-scoped-host";
+      const candidates = root.querySelectorAll(
+        "ks-button-1-1-19, ks-button-1-1-14, ks-button-91z"
+      );
+      for (const kb of candidates) {
+        if ((kb.textContent || "").trim() !== "Confirm") continue;
+        if (!insidePickerPopup(kb)) continue;
+        const btn = kb.shadowRoot?.querySelector("button");
+        if (btn) { btn.click(); return "popup-scoped-shadow"; }
+        kb.click(); return "popup-scoped-host";
+      }
+      for (const el of root.querySelectorAll("*")) {
+        if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
+      }
+      return null;
+    }
+    return walk(document);
+  });
+  lg(onLog, "info", `   🗓️  Confirm try 3 (popup-scoped walk): ${clicked}`);
+  if (clicked) { await page.waitForTimeout(500); return; }
+
+  // ── Try 4: data-testid partial match — "core-index-" suffix buttons inside footer ──
+  clicked = await page.evaluate(() => {
+    function findFooterAppend(root) {
+      const el = root.querySelector(".picker-core__popup-footer-append");
+      if (el) return el;
+      for (const c of root.querySelectorAll("*")) {
+        if (c.shadowRoot) { const r = findFooterAppend(c.shadowRoot); if (r) return r; }
+      }
+      return null;
+    }
+    const footer = findFooterAppend(document);
+    if (!footer) return "no-footer";
+    // Get all ks-button-* with a data-testid; the LAST one is always Confirm
+    const all = [...footer.querySelectorAll("[data-testid]")].filter(el =>
+      el.tagName && el.tagName.toLowerCase().startsWith("ks-button")
+    );
+    if (all.length === 0) return "no-testid-buttons";
+    const last = all[all.length - 1];
+    const btn = last.shadowRoot?.querySelector("button");
+    if (btn) { btn.click(); return `footer-last-testid:${last.dataset.testid}`; }
+    last.click(); return `footer-last-host:${last.dataset.testid}`;
+  });
+  lg(onLog, "info", `   🗓️  Confirm try 4 (footer last testid): ${clicked}`);
+  if (clicked && !clicked.startsWith("no-")) { await page.waitForTimeout(500); return; }
+
+  // ── Try 5: Use data-testid from known HTML — "core-index-g1HneZ" anywhere in DOM ──
+  clicked = await page.evaluate(() => {
+    function walk(root) {
+      const el = root.querySelector('[data-testid="core-index-g1HneZ"]');
+      if (el) {
+        const btn = el.shadowRoot?.querySelector("button");
+        if (btn) { btn.click(); return "global-testid-shadow"; }
+        el.click(); return "global-testid-host";
       }
       for (const c of root.querySelectorAll("*")) {
         if (c.shadowRoot) { const r = walk(c.shadowRoot); if (r) return r; }
@@ -490,7 +546,7 @@ async function clickConfirm(page, onLog) {
     }
     return walk(document);
   });
-  lg(onLog, "info", `   🗓️  Confirm try 3 (global scoped KsButton): ${clicked}`);
+  lg(onLog, "info", `   🗓️  Confirm try 5 (global testid g1HneZ): ${clicked}`);
   if (clicked) { await page.waitForTimeout(500); return; }
 
   lg(onLog, "warn", "   🗓️  ⚠️  All Confirm tries failed — date may not be applied");
@@ -500,7 +556,6 @@ async function clickConfirm(page, onLog) {
 // ════════════════════════════════════════════════════════
 // SET DATE RANGE
 // ════════════════════════════════════════════════════════
-
 async function setDateRange(page, dateFrom, dateTo, onLog) {
   const fY = dateFrom.getFullYear(), fM = dateFrom.getMonth(), fD = dateFrom.getDate();
   const tY = dateTo.getFullYear(),   tM = dateTo.getMonth(),   tD = dateTo.getDate();
@@ -509,7 +564,9 @@ async function setDateRange(page, dateFrom, dateTo, onLog) {
   lg(onLog, "info", `📅 Setting date: ${MONTH_NAMES[fM]} ${fD} ${fY}${isSame ? " (single)" : " → " + MONTH_NAMES[tM] + " " + tD + " " + tY}`);
 
   const opened = await openDatePicker(page, onLog);
-  if (!opened) lg(onLog, "warn", "⚠️ Calendar may not have opened — continuing anyway");
+  if (!opened) {
+    lg(onLog, "warn", "⚠️ Calendar may not have opened — trying to continue anyway");
+  }
   await page.waitForTimeout(200);
 
   await navigateToMonth(page, fY, fM, onLog);
@@ -533,15 +590,15 @@ async function setDateRange(page, dateFrom, dateTo, onLog) {
 }
 
 // ════════════════════════════════════════════════════════
-// READ SPEND — no suffix selectors anywhere
+// READ SPEND
 // ════════════════════════════════════════════════════════
-
 async function waitForTable(page, ms, onLog) {
   lg(onLog, "info", "   💰 Waiting for table to load...");
   const start = Date.now();
   while (Date.now() - start < ms) {
+    // ── Check for session expiry mid-wait ──
     if (isLoginUrl(page.url())) {
-      lg(onLog, "warn", "   ⚠️ Redirected to login while waiting for table");
+      lg(onLog, "warn", "   ⚠️ Redirected to login while waiting for table — session expired");
       return "login";
     }
     const found = await page.evaluate(() => {
@@ -568,27 +625,27 @@ async function readSpend(page, onLog) {
 
   lg(onLog, "info", "   💰 Reading spend...");
 
-  // Try 1: div[slot="footer-stat_cost"] — find any leaf child with text
   let result = await page.evaluate(() => {
     const slotDiv = document.querySelector('div[slot="footer-stat_cost"]');
     if (!slotDiv) return { found: false, method: "no-slot-div" };
-    for (const child of slotDiv.querySelectorAll("*")) {
-      const t = child.textContent?.trim();
-      if (t && t !== "—") return { found: true, text: t, method: "slot-child-text" };
+    // Try new suffix first, then old
+    const ksText = slotDiv.querySelector("ks-text-1-1-19") || slotDiv.querySelector("ks-text-1-1-14");
+    if (ksText) {
+      const t = ksText.textContent?.trim();
+      if (t) return { found: true, text: t, method: "ks-text-slot" };
     }
     const t = slotDiv.textContent?.trim();
-    return (t && t !== "—") ? { found: true, text: t, method: "slot-div-text" } : { found: false, method: "empty-slot" };
+    return t ? { found: true, text: t, method: "slot-div-text" } : { found: false, method: "empty-slot" };
   });
   lg(onLog, "info", `   💰 Try 1 (slot div): found=${result.found} method=${result.method} text="${result.text || ""}"`);
   if (result.found && result.text && result.text !== "—") return parseSpend(result.text);
 
-  // Try 2: shadow walk for [slot="footer-stat_cost"]
   result = await page.evaluate(() => {
     function walk(root) {
       const slot = root.querySelector('[slot="footer-stat_cost"]');
       if (slot) {
         const t = slot.textContent?.trim();
-        if (t && t !== "—") return { found: true, text: t, method: "shadow-slot" };
+        if (t && t !== "—") return { found: true, text: t, method: "shadow-walk-slot" };
       }
       for (const el of root.querySelectorAll("*")) {
         if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
@@ -600,7 +657,6 @@ async function readSpend(page, onLog) {
   lg(onLog, "info", `   💰 Try 2 (shadow walk slot): found=${result.found} text="${result.text || ""}"`);
   if (result.found && result.text) return parseSpend(result.text);
 
-  // Try 3: tfoot with data-testid or slot containing "stat_cost"
   result = await page.evaluate(() => {
     const tfoot = document.querySelector("tfoot");
     if (!tfoot) return { found: false, method: "no-tfoot" };
@@ -616,21 +672,23 @@ async function readSpend(page, onLog) {
     if (m) return parseSpend(m[0]);
   }
 
-  // Try 4: any leaf element with currency pattern (tag-agnostic, no suffix)
   result = await page.evaluate(() => {
     function walk(root) {
-      for (const el of root.querySelectorAll("*")) {
+      const texts = root.querySelectorAll("ks-text-1-1-19, ks-text-1-1-14, ks-text-91z");
+      for (const el of texts) {
         const t = el.textContent?.trim() || "";
-        if (/[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/.test(t) && el.children.length === 0) {
-          return { found: true, text: t, method: "leaf-currency" };
+        if (/[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/.test(t)) {
+          return { found: true, text: t, method: "ks-text-currency" };
         }
+      }
+      for (const el of root.querySelectorAll("*")) {
         if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
       }
       return { found: false };
     }
     return walk(document);
   });
-  lg(onLog, "info", `   💰 Try 4 (leaf currency): found=${result.found} text="${result.text || ""}"`);
+  lg(onLog, "info", `   💰 Try 4 (ks-text currency): found=${result.found} text="${result.text || ""}"`);
   if (result.found && result.text) return parseSpend(result.text);
 
   lg(onLog, "warn", "   💰 All spend methods failed — using 0");
@@ -640,7 +698,6 @@ async function readSpend(page, onLog) {
 // ════════════════════════════════════════════════════════
 // WAIT FOR CAMPAIGNS PAGE
 // ════════════════════════════════════════════════════════
-
 async function waitForCampaignsPage(page, aadvid, onLog) {
   lg(onLog, "info", `   🌐 Waiting for campaigns page (aadvid: ${aadvid})...`);
   const deadline = Date.now() + 3 * 60 * 1000;
@@ -649,10 +706,12 @@ async function waitForCampaignsPage(page, aadvid, onLog) {
   while (Date.now() < deadline) {
     const url = page.url();
 
+    // ── Session expiry check ──
     if (isLoginUrl(url)) {
-      lg(onLog, "warn", "   ⚠️ TikTok redirected to login — session expired");
+      lg(onLog, "warn", "   ⚠️ TikTok redirected to login page — session expired");
       await ensureSession(page, onLog, `account ${aadvid || "?"}`);
-      return false;
+      // After re-login, navigate back to the account URL
+      return false; // caller will re-navigate
     }
 
     if (Date.now() - lastLog > 5000) {
@@ -665,7 +724,8 @@ async function waitForCampaignsPage(page, aadvid, onLog) {
         function walk(root) {
           for (const el of root.querySelectorAll("*")) {
             if (el.tagName && el.tagName.toLowerCase().includes("display-field") && el.shadowRoot) {
-              if (el.shadowRoot.querySelector("button")) return true;
+              const btn = el.shadowRoot.querySelector("button");
+              if (btn) return true;
             }
             if (el.shadowRoot && walk(el.shadowRoot)) return true;
           }
@@ -675,7 +735,7 @@ async function waitForCampaignsPage(page, aadvid, onLog) {
       });
 
       if (pickerFound) {
-        lg(onLog, "ok", "   ✅ Campaigns page ready — date picker found");
+        lg(onLog, "ok", "   ✅ Campaigns page ready — date picker found in shadow DOM");
         return true;
       }
       lg(onLog, "info", "   🌐 On campaigns page but picker not ready yet...");
@@ -690,50 +750,40 @@ async function waitForCampaignsPage(page, aadvid, onLog) {
 // ════════════════════════════════════════════════════════
 // SCRAPE ONE ACCOUNT
 // ════════════════════════════════════════════════════════
-
 async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
-  lg(onLog, "info", `   🌐 Account entry: ${accountUrl.slice(0, 80)}`);
+  lg(onLog, "info", `   🌐 Account URL: ${accountUrl.slice(0, 80)}`);
 
   let cleanUrl = accountUrl;
   let aadvid = null;
   try {
-    // Support two input formats:
-    //   1. Plain numeric ID:  "7336115641021349890"
-    //   2. Full URL:          "https://ads.tiktok.com/i18n/manage/campaign?aadvid=73361..."
-    // In both cases we build a clean minimal URL with just the aadvid param,
-    // so TikTok always lands on the current state of that account.
-    const trimmed = accountUrl.trim();
-    if (/^\d+$/.test(trimmed)) {
-      // Plain numeric ID — build the URL directly
-      aadvid   = trimmed;
-      cleanUrl = `https://ads.tiktok.com/i18n/manage/campaign?aadvid=${aadvid}`;
-    } else {
-      // Full URL — extract aadvid from query string
-      const u = new URL(trimmed);
-      aadvid   = u.searchParams.get("aadvid");
-      cleanUrl = aadvid
-        ? `https://ads.tiktok.com/i18n/manage/campaign?aadvid=${aadvid}`
-        : trimmed;
-    }
-    lg(onLog, "info", `   🌐 aadvid: ${aadvid} → ${cleanUrl}`);
+    const u = new URL(accountUrl);
+    aadvid = u.searchParams.get("aadvid");
+    if (aadvid) cleanUrl = `https://ads.tiktok.com/i18n/manage/campaign?aadvid=${aadvid}`;
+    lg(onLog, "info", `   🌐 Clean URL: ${cleanUrl}`);
   } catch (e) {
     lg(onLog, "warn", `   🌐 URL parse error: ${e.message}`);
   }
 
+  // Navigate — with one retry if session expired mid-navigation
   for (let attempt = 0; attempt < 2; attempt++) {
     lg(onLog, "info", `   🌐 Navigating... (attempt ${attempt + 1})`);
     await page.goto(cleanUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForTimeout(800);
+
+    // Check for session expiry right after navigation
     if (isLoginUrl(page.url())) {
-      lg(onLog, "warn", "   ⚠️ Redirected to login — recovering...");
+      lg(onLog, "warn", "   ⚠️ Redirected to login after navigation — recovering session...");
       await ensureSession(page, onLog, `account ${aadvid || "?"}`);
+      // Loop back and navigate again after re-login
       continue;
     }
-    break;
+
+    break; // navigation successful
   }
 
   await waitForCampaignsPage(page, aadvid, onLog);
 
+  // Final session check before scraping
   if (isLoginUrl(page.url())) {
     await ensureSession(page, onLog, `pre-scrape ${aadvid || "?"}`);
     await page.goto(cleanUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
@@ -744,22 +794,25 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
   lg(onLog, "info", "   📅 Setting date range...");
   await setDateRange(page, dateFrom, dateTo, onLog);
 
-  // Guard: if Confirm accidentally navigated to campaign creation, recover
+  // ── Guard: detect accidental navigation to campaign creation ──
   const postDateUrl = page.url();
   if (postDateUrl.includes("/creation/") || postDateUrl.includes("/create/campaign")) {
-    lg(onLog, "warn", `   ⚠️ Accidental navigation to campaign creation! Recovering...`);
+    lg(onLog, "warn", `   ⚠️ Detected accidental navigation to campaign creation page after date set!`);
+    lg(onLog, "warn", `   ⚠️ URL: ${postDateUrl.slice(0, 120)}`);
+    lg(onLog, "warn", `   ⚠️ Pressing Escape and navigating back...`);
     await page.keyboard.press("Escape");
     await page.waitForTimeout(300);
     await page.goto(cleanUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForTimeout(800);
     await waitForCampaignsPage(page, aadvid, onLog);
-    lg(onLog, "info", "   📅 Re-setting date range...");
+    lg(onLog, "info", "   📅 Re-setting date range after recovery...");
     await setDateRange(page, dateFrom, dateTo, onLog);
   }
 
   lg(onLog, "info", "   💰 Reading spend...");
   let spend = await readSpend(page, onLog);
 
+  // If session expired while reading spend, recover and retry once
   if (spend === "SESSION_EXPIRED") {
     lg(onLog, "warn", "   ⚠️ Session expired while reading spend — recovering...");
     await ensureSession(page, onLog, `spend-read ${aadvid || "?"}`);
@@ -769,7 +822,7 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
     await setDateRange(page, dateFrom, dateTo, onLog);
     spend = await readSpend(page, onLog);
     if (spend === "SESSION_EXPIRED") {
-      lg(onLog, "warn", "   ⚠️ Spend still unreadable — using 0");
+      lg(onLog, "warn", "   ⚠️ Spend still unreadable after re-login — using 0");
       spend = 0;
     }
   }
@@ -781,7 +834,6 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
 // ════════════════════════════════════════════════════════
 // MAIN — per-member entry point
 // ════════════════════════════════════════════════════════
-
 async function runTikTok({ member, dateFrom, dateTo, onLog, launchMinimized, sharedPage, cancelToken }) {
   const fromDate = new Date(dateFrom);
   const toDate   = new Date(dateTo || dateFrom);
@@ -796,6 +848,7 @@ async function runTikTok({ member, dateFrom, dateTo, onLog, launchMinimized, sha
   lg(onLog, "info", `🎵 TikTok: ${member.name} — ${accounts.length} account(s) [waiting for shared page...]`);
   lg(onLog, "info", `   Date: ${fromDate.toDateString()} → ${toDate.toDateString()}`);
 
+  // Use the shared page — serialised via mutex so parallel members don't clash
   return withTiktokLock(async () => {
     const page = sharedPage || _sharedPage;
     if (!page) throw new Error("TikTok: shared Chrome page not initialised — call initSharedChrome first");
@@ -803,16 +856,11 @@ async function runTikTok({ member, dateFrom, dateTo, onLog, launchMinimized, sha
     lg(onLog, "info", `🎵 TikTok: ${member.name} — acquired shared page, scraping now`);
 
     try {
-      if (cancelToken && cancelToken.cancelled) {
-        lg(onLog, "warn", "⏹ Stop requested — TikTok skipping scrape.");
-        return { success: true, memberId: member.id, totalSpend: 0 };
-      }
+      // Check for stop before beginning account scraping
+      if(cancelToken && cancelToken.cancelled){lg(onLog,"warn","⏹ Stop requested — TikTok skipping scrape.");return{success:true,memberId:member.id,totalSpend:0};}
       let totalSpend = 0;
       for (let i = 0; i < accounts.length; i++) {
-        if (cancelToken && cancelToken.cancelled) {
-          lg(onLog, "warn", "⏹ Stop requested — TikTok stopping account loop.");
-          break;
-        }
+        if(cancelToken && cancelToken.cancelled){lg(onLog,"warn","⏹ Stop requested — TikTok stopping account loop.");break;}
         lg(onLog, "info", `\n🎵 ── Account ${i + 1}/${accounts.length} ──`);
         try {
           const spend = await scrapeAccount(page, accounts[i], fromDate, toDate, onLog);

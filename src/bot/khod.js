@@ -3,8 +3,7 @@
 /**
  * khod.js — Khod-Whaat affiliate bot
  *
- * Uses REAL Google Chrome via CDP attach (same as dashboard_tiktok browser.js).
- * Chrome is spawned with zero automation flags — TikTok/Khod see a normal browser.
+ * Uses fast Playwright launchPersistentContext (via browser.js, ported from KHOD).
  * Each member gets their own persistent Chrome profile so sessions are saved.
  *
  * Login URL  : https://khod-whaat.com/affiliate/auth/login
@@ -68,13 +67,13 @@ function parseSheet(buffer, dateFrom, dateTo, isDelivered) {
 
   return {
     totalOrders,
-    avgQty:     qtyCount > 0           ? Math.round(qtySum / qtyCount * 100) / 100 : 0,
-    sumTahseel: isDelivered            ? Math.round(sumT * 100) / 100 : 0,
+    avgQty:     qtyCount > 0                   ? Math.round(qtySum / qtyCount * 100) / 100 : 0,
+    sumTahseel: isDelivered                    ? Math.round(sumT * 100) / 100 : 0,
     avgTahseel: isDelivered && tahseelCount > 0 ? Math.round(sumT / tahseelCount * 100) / 100 : 0,
   };
 }
 
-// ── Flatpickr helpers (exact selectors from khodbot) ──
+// ── Flatpickr helpers ──
 async function navigateFlatpickrToMonth(page, targetDate) {
   for (let i = 0; i < 24; i++) {
     const { month, year } = await page.evaluate(() => ({
@@ -95,7 +94,8 @@ async function navigateFlatpickrToMonth(page, targetDate) {
     } else {
       await page.click(".flatpickr-calendar.open .flatpickr-next-month");
     }
-    await page.waitForTimeout(250); // was 300 — safe to tighten
+    // Reduced: 150ms is enough for the flatpickr animation to settle
+    await page.waitForTimeout(150);
   }
 }
 
@@ -105,27 +105,29 @@ async function pickDateRange(page, dateFrom, dateTo, onLog) {
 
   await page.click("#from_date + input");
   await page.waitForSelector(".flatpickr-calendar.open", { timeout: 8000 });
-  await page.waitForTimeout(200);
+  // Reduced: 100ms is enough for the calendar to render
+  await page.waitForTimeout(100);
 
   await navigateFlatpickrToMonth(page, dateFrom);
   await page.click(`span.flatpickr-day[aria-label="${aria(dateFrom)}"]:not(.prevMonthDay):not(.nextMonthDay)`);
-  await page.waitForTimeout(300);
+  // Reduced: 150ms — calendar just needs to register the click
+  await page.waitForTimeout(150);
 
   if (dateFrom.getMonth() !== dateTo.getMonth() || dateFrom.getFullYear() !== dateTo.getFullYear()) {
     await navigateFlatpickrToMonth(page, dateTo);
   }
   await page.click(`span.flatpickr-day[aria-label="${aria(dateTo)}"]:not(.prevMonthDay):not(.nextMonthDay)`);
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(150);
 
   await page.keyboard.press("Escape");
-  await page.waitForTimeout(300);
+  // Reduced: 150ms — just for the popover to close
+  await page.waitForTimeout(150);
   lg(onLog, "ok", "✅ Date set");
 }
 
 async function filterAndExport(page, dateFrom, dateTo, onLog) {
   await page.waitForSelector("#from_date + input", { timeout: 15000 });
 
-  // Session guard: if Khod redirected to login mid-run, throw so caller can retry
   const currentUrl = page.url();
   if (currentUrl.includes("/login") || currentUrl.includes("/auth")) {
     throw new Error("Khod session expired — redirected to login during export");
@@ -134,7 +136,6 @@ async function filterAndExport(page, dateFrom, dateTo, onLog) {
   await pickDateRange(page, dateFrom, dateTo, onLog);
 
   lg(onLog, "info", "🔍 Clicking فلترة...");
-  // Filter button — try selectors in order, stop at first match
   const filterSelectors = [
     'button[name="filter"]',
     'button:has-text("فلترة")',
@@ -155,8 +156,12 @@ async function filterAndExport(page, dateFrom, dateTo, onLog) {
     } catch {}
   }
   if (!filtered) throw new Error("Filter button (فلترة) not found on page");
+
+  // Use networkidle-like wait: wait for domcontentloaded then wait for the
+  // badge/table to appear — faster and more reliable than a fixed 3000ms sleep
   await page.waitForLoadState("domcontentloaded");
-  await page.waitForTimeout(3000);
+  // Wait for the results to appear (badge or table row), max 8s
+  await page.waitForSelector(".badge.badge-soft-dark, table tbody tr", { timeout: 8000 }).catch(() => {});
 
   try {
     const badge = await page.$eval(".badge.badge-soft-dark", el => el.innerText.trim());
@@ -164,7 +169,6 @@ async function filterAndExport(page, dateFrom, dateTo, onLog) {
   } catch {}
 
   lg(onLog, "info", "📥 Clicking استخراج اكسل...");
-  // Export button — try selectors in order, stop at first match
   const exportSelectors = [
     'button[name="export"]',
     'button:has-text("استخراج")',
@@ -173,13 +177,11 @@ async function filterAndExport(page, dateFrom, dateTo, onLog) {
     'button:has-text("تصدير")',
     'a[href*="export"]',
   ];
-  let exportFound = false;
   for (const sel of exportSelectors) {
     try {
       const count = await page.locator(sel).count();
       if (count > 0) {
         lg(onLog, "info", `✅ Export button found via: ${sel}`);
-        exportFound = true;
         const dlPromise = page.waitForEvent("download", { timeout: 15 * 60 * 1000 });
         await page.locator(sel).first().click({ noWaitAfter: true });
         lg(onLog, "info", "⏳ Waiting for download...");
@@ -199,63 +201,63 @@ async function filterAndExport(page, dateFrom, dateTo, onLog) {
       lg(onLog, "warn", `⚠️ Selector "${sel}" failed: ${e.message}`);
     }
   }
-  if (!exportFound) throw new Error("Export button not found on page");
+  throw new Error("Export button not found on page");
 }
 
 // ══════════════════════════════════════════════
 // MAIN EXPORT
 // ══════════════════════════════════════════════
-async function runKhod({ member, dateFrom, dateTo, onLog, launchMinimized }) {
+async function runKhod({ member, dateFrom, dateTo, onLog, launchMinimized, cancelToken }) {
   const fromDate = new Date(dateFrom);
   const toDate   = new Date(dateTo || dateFrom);
+  const isCancelled = () => cancelToken && cancelToken.cancelled;
 
   lg(onLog, "info", `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   lg(onLog, "info", `👤 Khod-Whaat: ${member.name}`);
 
-  // Launch real Chrome with member's own profile (anti-detection, persistent session)
   const { context, page } = await launchChrome(onLog, `khod-${member.id}`, launchMinimized);
 
   try {
     // ── Login ──
     await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForTimeout(1500);
+    // Use event-driven wait: wait for either a login form OR a redirect away from login
+    // Reduced from 1500ms fixed sleep to a real signal-based wait (max 1500ms)
+    await page.waitForSelector('input[name="email"], .orders-list, [class*="dashboard"], [class*="affiliate"]', { timeout: 1500 }).catch(() => {});
 
     if (!page.url().includes("/login") && !page.url().includes("/auth")) {
       lg(onLog, "ok", "✅ Already logged in (saved session)");
     } else {
       lg(onLog, "info", `🔐 Logging in: ${member.name}...`);
 
-      // Up to 3 reload attempts if login form fields not found
       for (let loginAttempt = 1; loginAttempt <= 3; loginAttempt++) {
         try {
           if (loginAttempt > 1) {
             await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-            await page.waitForTimeout(2000);
+            // Wait for form to appear instead of fixed sleep
+            await page.waitForSelector('input[name="email"]', { timeout: 5000 }).catch(() => {});
           }
           await page.waitForSelector('input[name="email"]', { timeout: 8000 });
           await page.fill('input[name="email"]',    member.khodEmail);
-          await page.waitForTimeout(300);
           await page.fill('input[name="password"]', member.khodPassword);
-          await page.waitForTimeout(300);
           await page.click('button[type="submit"]');
-          await page.waitForTimeout(1500);
+          // Wait for navigation signal instead of fixed sleep
+          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
           lg(onLog, "info", `🔐 Credentials submitted (attempt ${loginAttempt})`);
           break;
         } catch (e) {
-          // Try phone field as fallback on attempt 2
           if (loginAttempt === 2) {
             try {
               await page.waitForSelector('input[name="phone"], input[name="phoneNumber"]', { timeout: 5000 });
               await page.fill('input[name="phone"], input[name="phoneNumber"]', member.khodEmail);
               await page.fill('input[name="password"]', member.khodPassword);
               await page.click('button[type="submit"]');
-              await page.waitForTimeout(1500);
+              await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
               break;
             } catch {}
           }
           if (loginAttempt < 3) {
             lg(onLog, "warn", `⚠️ Login fields not found (attempt ${loginAttempt}) — reloading...`);
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(1000);
           } else {
             lg(onLog, "warn", `⚠️ Login fields not found after 3 attempts — waiting for manual login`);
           }
@@ -266,7 +268,7 @@ async function runKhod({ member, dateFrom, dateTo, onLog, launchMinimized }) {
       const deadline = Date.now() + 5 * 60 * 1000;
       let confirmed = false;
       while (Date.now() < deadline) {
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(1500);
         const u = page.url();
         if (!u.includes("/login") && !u.includes("/auth")) { confirmed = true; break; }
         lg(onLog, "info", `⏳ Waiting for login (${Math.ceil((deadline - Date.now()) / 60000)}m left)...`);
@@ -275,11 +277,14 @@ async function runKhod({ member, dateFrom, dateTo, onLog, launchMinimized }) {
       lg(onLog, "ok", "✅ Khod login confirmed");
     }
 
+    // ── Check for cancellation before starting phases ──
+    if(isCancelled()){lg(onLog,"warn","⏹ Stop requested — Khod skipping phases.");throw new Error("Bot stopped by user");}
+
     // ── Phase A: All Orders ──
     lg(onLog, "info", `\n📋 Phase A: All orders`);
     await page.goto(ALL_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForTimeout(1500);
-    // Session guard: re-throw with clear message if session expired
+    // Wait for page content instead of fixed sleep
+    await page.waitForSelector("#from_date, table, .orders-list", { timeout: 5000 }).catch(() => {});
     if (page.url().includes("/login") || page.url().includes("/auth")) {
       throw new Error("Khod session expired after navigating to orders page");
     }
@@ -287,11 +292,14 @@ async function runKhod({ member, dateFrom, dateTo, onLog, launchMinimized }) {
     const allData   = parseSheet(allBuffer, fromDate, toDate, false);
     lg(onLog, "ok", `✅ All: ${allData.totalOrders} orders | Avg Qty: ${allData.avgQty}`);
 
+    // ── Check for cancellation between phases ──
+    if(isCancelled()){lg(onLog,"warn","⏹ Stop requested — Khod skipping Phase B.");throw new Error("Bot stopped by user");}
+
     // ── Phase B: Delivered Orders ──
     lg(onLog, "info", `\n📦 Phase B: Delivered`);
     await page.goto(DELIVERED_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForTimeout(1500);
-    // Session guard: re-throw with clear message if session expired
+    // Wait for page content instead of fixed sleep
+    await page.waitForSelector("#from_date, table, .orders-list", { timeout: 5000 }).catch(() => {});
     if (page.url().includes("/login") || page.url().includes("/auth")) {
       throw new Error("Khod session expired after navigating to delivered orders page");
     }
