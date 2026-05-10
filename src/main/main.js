@@ -10,6 +10,26 @@ const { autoUpdater } = require("electron-updater");
 // ════════════════════════════════════════
 autoUpdater.autoDownload    = false; // user clicks "Update" — we don't download behind their back
 autoUpdater.autoInstallOnAppQuit = true; // once downloaded, install silently on next quit
+autoUpdater.allowPrerelease = false;
+
+// ── Logger so errors show up in DevTools console ──
+autoUpdater.logger = {
+  info:  (...a) => console.log("[updater]",  ...a),
+  warn:  (...a) => console.warn("[updater]", ...a),
+  error: (...a) => console.error("[updater]",...a),
+  debug: (...a) => {},
+};
+
+// ── Required for PRIVATE GitHub repos ──
+// Create a fine-grained token with read-only access to this repo's contents/releases
+// then paste it here. For PUBLIC repos, delete these 3 lines.
+autoUpdater.setFeedURL({
+  provider: "github",
+  owner: "abdelrahman252",
+  repo: "a-s-team",
+  private: true,
+  token: process.env.GH_TOKEN || "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",
+});
 
 // ════════════════════════════════════════
 // STARTUP PERFORMANCE FLAGS
