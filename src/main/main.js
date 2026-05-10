@@ -35,8 +35,7 @@ autoUpdater.setFeedURL({
   provider: "github",
   owner: "abdelrahman252",
   repo: "a-s-team",
-  private: true,
-  token: process.env.GH_TOKEN || "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",
+  private: true
 });
 
 // ════════════════════════════════════════
