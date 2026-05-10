@@ -19,6 +19,10 @@
  *  LEFT panel:  .date-grid-header__controls (visible ←), --hidden class on right controls
  *  RIGHT panel: .date-grid-header__controls (visible →), --hidden class on left controls
  *  Always click the arrow inside a NON-hidden controls group.
+ *
+ * CHROME MODEL:
+ *  Each TikTok account gets a fresh Chrome launch → scrape → close.
+ *  No shared context or page. No mutex needed.
  */
 
 const { launchChrome, closeChrome } = require("./browser");
@@ -37,35 +41,36 @@ function parseSpend(text) {
 }
 
 // ════════════════════════════════════════════════════════
-// SHARED CHROME STATE + MUTEX
+// CONTEXT REGISTRY — for force-kill on cancel
 // ════════════════════════════════════════════════════════
 
-let _sharedContext = null;
-let _sharedPage    = null;
-let _tiktokMutexTail = Promise.resolve();
+const _activeContexts = new Set();
 
-async function withTiktokLock(fn) {
-  let release;
-  const acquired = new Promise(res => { release = res; });
-  const previous = _tiktokMutexTail;
-  _tiktokMutexTail = previous.then(() => acquired);
-  await previous;
-  try { return await fn(); } finally { release(); }
+function _registerContext(ctx)   { _activeContexts.add(ctx); }
+function _unregisterContext(ctx) { _activeContexts.delete(ctx); }
+
+// ════════════════════════════════════════════════════════
+// GLOBAL SERIAL QUEUE — one TikTok account at a time
+// across ALL members (no two Chrome instances overlap)
+// ════════════════════════════════════════════════════════
+
+let _tiktokQueueTail = Promise.resolve();
+
+function _enqueueTikTok(fn) {
+  const next = _tiktokQueueTail.then(() => fn());
+  // Swallow errors in the tail so one failure doesn't brick the queue
+  _tiktokQueueTail = next.catch(() => {});
+  return next;
 }
 
-async function initSharedChrome(onLog, launchMinimized) {
-  if (_sharedContext && _sharedPage) return;
-  _tiktokMutexTail = Promise.resolve();
-  const { context, page } = await launchChrome(onLog, "tiktok-shared", launchMinimized);
-  _sharedContext = context;
-  _sharedPage    = page;
-}
-
-async function closeSharedChrome(onLog) {
-  if (_sharedContext) {
-    await closeChrome(_sharedContext, onLog);
-    _sharedContext = null;
-    _sharedPage    = null;
+async function closeAllActiveContexts(onLog) {
+  const all = [..._activeContexts];
+  _activeContexts.clear();
+  for (const ctx of all) {
+    try { await ctx.close(); } catch {}
+  }
+  if (all.length > 0) {
+    lg(onLog, "info", `🔒 Force-closed ${all.length} active TikTok Chrome context(s).`);
   }
 }
 
@@ -172,7 +177,7 @@ async function openDatePicker(page, onLog) {
     lg(onLog, "info", `   🗓️  Try 3 (shadow month-text button): ${clicked}`);
   }
 
-  // Try 4: element with class containing "picker" 
+  // Try 4: element with class containing "picker"
   if (!clicked) {
     clicked = await page.evaluate(() => {
       const el = document.querySelector("[class*='picker--'], [class*='KsDateRange']");
@@ -369,36 +374,6 @@ async function clickDay(page, day, targetMonth, targetYear, onLog) {
 async function clickConfirm(page, onLog) {
   lg(onLog, "info", "   🗓️  Clicking Confirm...");
 
-  // Helper: find .picker-core__popup-footer-append by walking all shadow roots
-  // This is the stable container — class name never changes.
-  function findFooterAppend(root) {
-    const el = root.querySelector(".picker-core__popup-footer-append");
-    if (el) return el;
-    for (const c of root.querySelectorAll("*")) {
-      if (c.shadowRoot) { const r = findFooterAppend(c.shadowRoot); if (r) return r; }
-    }
-    return null;
-  }
-
-  // Helper: given a footer element, click the element whose shadow/text says "Confirm".
-  // Never clicks by position alone without a text check.
-  function clickConfirmInFooter(footer) {
-    // Collect all direct children that could be buttons (any tag with KsButton class)
-    const candidates = [...footer.querySelectorAll("[class*='KsButton']")];
-    for (const el of candidates) {
-      if ((el.textContent || "").trim() === "Confirm") {
-        const btn = el.shadowRoot ? el.shadowRoot.querySelector("button") : null;
-        if (btn) { btn.click(); return "ksbutton-shadow"; }
-        el.click(); return "ksbutton-host";
-      }
-    }
-    // Also check plain <button> elements (in case shadow not used)
-    for (const btn of footer.querySelectorAll("button")) {
-      if ((btn.textContent || "").trim() === "Confirm") { btn.click(); return "plain-button"; }
-    }
-    return null;
-  }
-
   // Try 1: footer-append → any KsButton/button with text "Confirm"
   let clicked = await page.evaluate(() => {
     function findFooter(root) {
@@ -545,15 +520,10 @@ async function waitForTable(page, ms, onLog) {
       return "login";
     }
     const found = await page.evaluate(() => {
+      // Primary signal: the cost footer slot div exists in the live DOM
+      if (document.querySelector('div[slot="footer-stat_cost"]')) return "slot";
       if (document.querySelector("tfoot")) return "tfoot";
-      function walk(root) {
-        if (root.querySelector("[slot='footer-stat_cost']")) return "slot";
-        for (const el of root.querySelectorAll("*")) {
-          if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
-        }
-        return null;
-      }
-      return walk(document);
+      return null;
     });
     if (found) { lg(onLog, "info", `   💰 Table found (${found})`); return found; }
     await page.waitForTimeout(600);
@@ -568,69 +538,115 @@ async function readSpend(page, onLog) {
 
   lg(onLog, "info", "   💰 Reading spend...");
 
-  // Try 1: div[slot="footer-stat_cost"] — find any leaf child with text
+  // ── STRUCTURE (from real HTML snapshots) ─────────────────────────────────
+  //  div[slot="footer-stat_cost"]          ← always in the light DOM
+  //    ks-space-{suffix}                   ← custom element, shadowRoot = <slot>
+  //    ks-text-{suffix}                    ← custom element, shadowRoot = <slot>
+  //      [text node] "675.17 SAR"          ← the value we need
+  //
+  // .textContent on the ks-* host elements is EMPTY with declarative shadow DOM
+  // (the text lives inside the shadow <slot>, not the light DOM tree).
+  // Strategy: find div[slot="footer-stat_cost"], iterate its DIRECT children,
+  // for each child read its shadowRoot's text nodes (where the real text lives),
+  // and also fall back to innerText / textContent of the host itself.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Try 1: shadowRoot text nodes of ks-text child inside the slot div
   let result = await page.evaluate(() => {
+    const CURRENCY_RE = /[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/;
+
+    function extractTextFromNode(node) {
+      // Walk all text nodes inside a given DOM node (including its shadowRoot)
+      const texts = [];
+      function collect(n) {
+        if (n.nodeType === Node.TEXT_NODE) {
+          const t = n.textContent.trim();
+          if (t) texts.push(t);
+        }
+        // Light DOM children
+        for (const child of (n.childNodes || [])) collect(child);
+        // Shadow DOM children
+        if (n.shadowRoot) {
+          for (const child of n.shadowRoot.childNodes) collect(child);
+        }
+      }
+      collect(node);
+      return texts.join(" ");
+    }
+
     const slotDiv = document.querySelector('div[slot="footer-stat_cost"]');
     if (!slotDiv) return { found: false, method: "no-slot-div" };
-    for (const child of slotDiv.querySelectorAll("*")) {
-      const t = child.textContent?.trim();
-      if (t && t !== "—") return { found: true, text: t, method: "slot-child-text" };
-    }
-    const t = slotDiv.textContent?.trim();
-    return (t && t !== "—") ? { found: true, text: t, method: "slot-div-text" } : { found: false, method: "empty-slot" };
-  });
-  lg(onLog, "info", `   💰 Try 1 (slot div): found=${result.found} method=${result.method} text="${result.text || ""}"`);
-  if (result.found && result.text && result.text !== "—") return parseSpend(result.text);
 
-  // Try 2: shadow walk for [slot="footer-stat_cost"]
-  result = await page.evaluate(() => {
-    function walk(root) {
-      const slot = root.querySelector('[slot="footer-stat_cost"]');
-      if (slot) {
-        const t = slot.textContent?.trim();
-        if (t && t !== "—") return { found: true, text: t, method: "shadow-slot" };
+    // Walk every descendant of slotDiv (light DOM only — custom elements)
+    // and for each one also read its shadowRoot text nodes
+    const allNodes = [slotDiv, ...slotDiv.querySelectorAll("*")];
+    for (const node of allNodes) {
+      const t = extractTextFromNode(node);
+      if (CURRENCY_RE.test(t)) {
+        return { found: true, text: t, method: "shadow-text-node" };
       }
-      for (const el of root.querySelectorAll("*")) {
-        if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
-      }
-      return { found: false };
     }
-    return walk(document);
+
+    return { found: false, method: "no-currency-found" };
   });
-  lg(onLog, "info", `   💰 Try 2 (shadow walk slot): found=${result.found} text="${result.text || ""}"`);
+  lg(onLog, "info", `   💰 Try 1 (shadow text nodes): found=${result.found} method=${result.method} text="${result.text || ""}"`);
   if (result.found && result.text) return parseSpend(result.text);
 
-  // Try 3: tfoot with data-testid or slot containing "stat_cost"
+  // Try 2: innerText on the slot div — works if Chromium resolves slotted text
   result = await page.evaluate(() => {
+    const CURRENCY_RE = /[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/;
+    const slotDiv = document.querySelector('div[slot="footer-stat_cost"]');
+    if (!slotDiv) return { found: false, method: "no-slot-div" };
+    const t = (slotDiv.innerText || "").trim();
+    if (CURRENCY_RE.test(t)) return { found: true, text: t, method: "innerText" };
+    return { found: false, method: "no-innerText-match" };
+  });
+  lg(onLog, "info", `   💰 Try 2 (innerText): found=${result.found} text="${result.text || ""}"`);
+  if (result.found && result.text) return parseSpend(result.text);
+
+  // Try 3: tfoot — look for any th/td containing a currency amount
+  result = await page.evaluate(() => {
+    const CURRENCY_RE = /[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/;
     const tfoot = document.querySelector("tfoot");
     if (!tfoot) return { found: false, method: "no-tfoot" };
-    const th = tfoot.querySelector('[data-testid*="stat_cost"], [slot*="stat_cost"]');
-    if (th) return { found: true, text: th.textContent?.trim(), method: "tfoot-testid" };
-    const ths = [...tfoot.querySelectorAll("th")];
-    const texts = ths.map(t => t.textContent?.trim()).filter(Boolean);
-    return { found: texts.length > 0, text: texts.join(" | "), method: "tfoot-all-ths" };
+    for (const cell of tfoot.querySelectorAll("th, td")) {
+      const t = (cell.innerText || cell.textContent || "").trim();
+      if (CURRENCY_RE.test(t)) return { found: true, text: t, method: "tfoot-cell" };
+    }
+    return { found: false, method: "tfoot-no-match" };
   });
   lg(onLog, "info", `   💰 Try 3 (tfoot): found=${result.found} text="${result.text || ""}"`);
-  if (result.found && result.text) {
-    const m = result.text.match(/[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/);
-    if (m) return parseSpend(m[0]);
-  }
+  if (result.found && result.text) return parseSpend(result.text);
 
-  // Try 4: any leaf element with currency pattern (tag-agnostic, no suffix)
+  // Try 4: page-wide scan — find ANY element whose innerText matches a currency
+  //         pattern AND is scoped near "stat_cost" in the DOM path (data-* or slot attr)
   result = await page.evaluate(() => {
-    function walk(root) {
+    const CURRENCY_RE = /[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/;
+    // Walk the full light DOM; for each element also check its shadowRoot children
+    function collectTextNodes(root, out = []) {
       for (const el of root.querySelectorAll("*")) {
-        const t = el.textContent?.trim() || "";
-        if (/[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/.test(t) && el.children.length === 0) {
-          return { found: true, text: t, method: "leaf-currency" };
+        // Check text nodes directly inside this element's shadowRoot
+        if (el.shadowRoot) {
+          for (const child of el.shadowRoot.childNodes) {
+            if (child.nodeType === Node.TEXT_NODE) {
+              const t = child.textContent.trim();
+              if (t && CURRENCY_RE.test(t)) out.push(t);
+            }
+          }
         }
-        if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
+        // Also check if the element itself (no shadow) has matching innerText
+        if (!el.shadowRoot && !el.children.length) {
+          const t = (el.textContent || "").trim();
+          if (t && CURRENCY_RE.test(t)) out.push(t);
+        }
       }
-      return { found: false };
+      return out;
     }
-    return walk(document);
+    const candidates = collectTextNodes(document);
+    if (candidates.length > 0) return { found: true, text: candidates[0], method: "global-shadow-text" };
+    return { found: false };
   });
-  lg(onLog, "info", `   💰 Try 4 (leaf currency): found=${result.found} text="${result.text || ""}"`);
+  lg(onLog, "info", `   💰 Try 4 (global shadow scan): found=${result.found} text="${result.text || ""}"`);
   if (result.found && result.text) return parseSpend(result.text);
 
   lg(onLog, "warn", "   💰 All spend methods failed — using 0");
@@ -697,18 +713,11 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
   let cleanUrl = accountUrl;
   let aadvid = null;
   try {
-    // Support two input formats:
-    //   1. Plain numeric ID:  "7336115641021349890"
-    //   2. Full URL:          "https://ads.tiktok.com/i18n/manage/campaign?aadvid=73361..."
-    // In both cases we build a clean minimal URL with just the aadvid param,
-    // so TikTok always lands on the current state of that account.
     const trimmed = accountUrl.trim();
     if (/^\d+$/.test(trimmed)) {
-      // Plain numeric ID — build the URL directly
       aadvid   = trimmed;
       cleanUrl = `https://ads.tiktok.com/i18n/manage/campaign?aadvid=${aadvid}`;
     } else {
-      // Full URL — extract aadvid from query string
       const u = new URL(trimmed);
       aadvid   = u.searchParams.get("aadvid");
       cleanUrl = aadvid
@@ -719,6 +728,11 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
   } catch (e) {
     lg(onLog, "warn", `   🌐 URL parse error: ${e.message}`);
   }
+
+  // Warmup: wake the page connection before real navigation
+  lg(onLog, "info", "   🌐 Warming up page connection...");
+  await page.goto("about:blank", { waitUntil: "commit", timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(300);
 
   for (let attempt = 0; attempt < 2; attempt++) {
     lg(onLog, "info", `   🌐 Navigating... (attempt ${attempt + 1})`);
@@ -779,10 +793,35 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
 }
 
 // ════════════════════════════════════════════════════════
+// PER-ACCOUNT LAUNCH → SCRAPE → CLOSE  (with one retry)
+// ════════════════════════════════════════════════════════
+
+async function scrapeAccountWithChrome(accountUrl, dateFrom, dateTo, onLog, launchMinimized, profileKey) {
+  // One attempt: launch, confirm login, scrape, close.
+  // Returns spend (number) or throws.
+  let context = null;
+  try {
+    const launched = await launchChrome(onLog, profileKey, launchMinimized);
+    context = launched.context;
+    _registerContext(context);
+    const page = launched.page;
+
+    await confirmInitialLogin(page, onLog);
+    const spend = await scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog);
+    return spend;
+  } finally {
+    if (context) {
+      _unregisterContext(context);
+      await closeChrome(context, onLog);
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════
 // MAIN — per-member entry point
 // ════════════════════════════════════════════════════════
 
-async function runTikTok({ member, dateFrom, dateTo, onLog, launchMinimized, sharedPage, cancelToken }) {
+async function runTikTok({ member, dateFrom, dateTo, onLog, launchMinimized, cancelToken }) {
   const fromDate = new Date(dateFrom);
   const toDate   = new Date(dateTo || dateFrom);
 
@@ -793,46 +832,79 @@ async function runTikTok({ member, dateFrom, dateTo, onLog, launchMinimized, sha
   }
 
   lg(onLog, "info", `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  lg(onLog, "info", `🎵 TikTok: ${member.name} — ${accounts.length} account(s) [waiting for shared page...]`);
+  lg(onLog, "info", `🎵 TikTok: ${member.name} — ${accounts.length} account(s)`);
   lg(onLog, "info", `   Date: ${fromDate.toDateString()} → ${toDate.toDateString()}`);
 
-  return withTiktokLock(async () => {
-    const page = sharedPage || _sharedPage;
-    if (!page) throw new Error("TikTok: shared Chrome page not initialised — call initSharedChrome first");
-
-    lg(onLog, "info", `🎵 TikTok: ${member.name} — acquired shared page, scraping now`);
-
-    try {
-      if (cancelToken && cancelToken.cancelled) {
-        lg(onLog, "warn", "⏹ Stop requested — TikTok skipping scrape.");
-        return { success: true, memberId: member.id, totalSpend: 0 };
-      }
-      let totalSpend = 0;
-      for (let i = 0; i < accounts.length; i++) {
-        if (cancelToken && cancelToken.cancelled) {
-          lg(onLog, "warn", "⏹ Stop requested — TikTok stopping account loop.");
-          break;
-        }
-        lg(onLog, "info", `\n🎵 ── Account ${i + 1}/${accounts.length} ──`);
-        try {
-          const spend = await scrapeAccount(page, accounts[i], fromDate, toDate, onLog);
-          totalSpend += (typeof spend === "number" ? spend : 0);
-          lg(onLog, "ok", `🎵 Account ${i + 1}: ${spend} | Total so far: ${totalSpend}`);
-        } catch (err) {
-          lg(onLog, "warn", `⚠️ Account ${i + 1} error: ${err.message} — using 0`);
-        }
-      }
-
-      lg(onLog, "ok", `✅ TikTok total for ${member.name}: ${totalSpend}`);
-      return { success: true, memberId: member.id, totalSpend };
-
-    } catch (err) {
-      lg(onLog, "error", `❌ TikTok fatal [${member.name}]: ${err.message}`);
-      return { success: false, memberId: member.id, totalSpend: 0, error: err.message };
+  try {
+    if (cancelToken && cancelToken.cancelled) {
+      lg(onLog, "warn", "⏹ Stop requested — TikTok skipping scrape.");
+      return { success: true, memberId: member.id, totalSpend: 0 };
     }
-  });
+
+    let totalSpend = 0;
+
+    for (let i = 0; i < accounts.length; i++) {
+      if (cancelToken && cancelToken.cancelled) {
+        lg(onLog, "warn", "⏹ Stop requested — TikTok stopping account loop.");
+        break;
+      }
+
+      const accountIndex = i;
+      const accountUrl   = accounts[i];
+
+      // All accounts across all members share one profile (one saved session)
+      // and are strictly serialised through the global queue — one Chrome at a time.
+      const spend = await _enqueueTikTok(async () => {
+        if (cancelToken && cancelToken.cancelled) {
+          lg(onLog, "warn", "⏹ Stop requested — skipping queued account.");
+          return 0;
+        }
+
+        lg(onLog, "info", `\n🎵 ── Account ${accountIndex + 1}/${accounts.length} (${member.name}) ──`);
+
+        let result = 0;
+        let succeeded = false;
+
+        // First attempt — always use the shared profile so saved session is reused
+        try {
+          result = await scrapeAccountWithChrome(accountUrl, fromDate, toDate, onLog, launchMinimized, "tiktok-shared");
+          result = typeof result === "number" ? result : 0;
+          succeeded = true;
+        } catch (err) {
+          lg(onLog, "warn", `⚠️ Account ${accountIndex + 1} attempt 1 failed: ${err.message} — retrying once...`);
+        }
+
+        // One retry on failure
+        if (!succeeded) {
+          if (cancelToken && cancelToken.cancelled) {
+            lg(onLog, "warn", "⏹ Stop requested — skipping retry.");
+            return 0;
+          }
+          try {
+            result = await scrapeAccountWithChrome(accountUrl, fromDate, toDate, onLog, launchMinimized, "tiktok-shared");
+            result = typeof result === "number" ? result : 0;
+            lg(onLog, "ok", `🎵 Account ${accountIndex + 1} retry succeeded.`);
+          } catch (err2) {
+            lg(onLog, "warn", `⚠️ Account ${accountIndex + 1} retry also failed: ${err2.message} — using 0`);
+            result = 0;
+          }
+        }
+
+        lg(onLog, "ok", `🎵 Account ${accountIndex + 1}: ${result}`);
+        return result;
+      });
+
+      totalSpend += spend;
+      lg(onLog, "ok", `🎵 Running total for ${member.name}: ${totalSpend}`);
+    }
+
+    lg(onLog, "ok", `✅ TikTok total for ${member.name}: ${totalSpend}`);
+    return { success: true, memberId: member.id, totalSpend };
+
+  } catch (err) {
+    lg(onLog, "error", `❌ TikTok fatal [${member.name}]: ${err.message}`);
+    return { success: false, memberId: member.id, totalSpend: 0, error: err.message };
+  }
 }
 
-function _getSharedPage() { return _sharedPage; }
-
-module.exports = { runTikTok, initSharedChrome, closeSharedChrome, confirmInitialLogin, _getSharedPage };
+module.exports = { runTikTok, confirmInitialLogin, closeAllActiveContexts };

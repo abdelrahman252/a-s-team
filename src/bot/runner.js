@@ -3,34 +3,27 @@
 /**
  * runner.js — Orchestrates the full bot run
  *
- * PARALLELISM MODEL (v6):
- * ──────────────────────
- *  • ALL members run in parallel via Promise.allSettled().
- *  • PER MEMBER: Khod + TikTok also run in parallel via Promise.all().
- *  • Result: if you have 4 members the whole run takes as long as the
- *    SLOWEST single member, not the sum of all members.
+ * PARALLELISM MODEL:
+ * ──────────────────
+ *  • Members run in parallel up to teamConfig.maxParallelMembers (default 3).
+ *  • A proper semaphore — as soon as one member finishes the next starts.
+ *  • PER MEMBER: Khod + TikTok run in parallel via Promise.all().
  *
  * CHROME INSTANCES:
  * ─────────────────
- *  • Khod  → 1 Chrome per member  (profile: khod-{id})  — run in parallel.
- *  • TikTok → 1 SHARED Chrome     (profile: tiktok-shared) — shared across
- *    all members. TikTok accounts are scraped one at a time inside that one
- *    window so there are no race conditions on the shared page.
+ *  • Khod   → 1 Chrome per member (profile: khod-{id})
+ *  • TikTok → 1 fresh Chrome PER ACCOUNT — launched, scraped, then closed.
+ *    No shared TikTok Chrome. No mutex.
  *
- * CANCEL:
- * ───────
- *  • CancelToken is checked before the parallel batch starts.
- *  • Individual Khod tasks propagate the cancellation naturally.
+ * CANCEL / FORCE-KILL:
+ * ────────────────────
+ *  • Pressing Stop sets cancelToken.cancelled = true AND immediately
+ *    calls closeAllActiveContexts() to force-close every live TikTok
+ *    Chrome context without waiting for them to cooperate.
  */
 
 const { runKhod }  = require("./khod");
-const {
-  runTikTok,
-  initSharedChrome,
-  closeSharedChrome,
-  confirmInitialLogin,
-  _getSharedPage,
-} = require("./tiktok");
+const { runTikTok, closeAllActiveContexts } = require("./tiktok");
 
 function lg(onLog, type, msg) { onLog({ type, msg }); }
 
@@ -42,6 +35,34 @@ class CancelToken {
   cancel()       { this.cancelled = true; }
   throwIfCancelled() {
     if (this.cancelled) throw new Error("Bot stopped by user");
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// Semaphore — limits concurrent member processing
+// ─────────────────────────────────────────────────────────
+class Semaphore {
+  constructor(max) {
+    this._max     = max;
+    this._current = 0;
+    this._queue   = [];
+  }
+
+  async acquire() {
+    if (this._current < this._max) {
+      this._current++;
+      return;
+    }
+    await new Promise(resolve => this._queue.push(resolve));
+    this._current++;
+  }
+
+  release() {
+    this._current--;
+    if (this._queue.length > 0) {
+      const next = this._queue.shift();
+      next();
+    }
   }
 }
 
@@ -66,7 +87,7 @@ async function processMember({ member, dateFrom, dateTo, onLog, onProgress, laun
   lg(onLog, "info", `${"═".repeat(50)}`);
   lg(onLog, "info", `⚡ Launching Khod + TikTok simultaneously...`);
 
-  // Khod gets its own Chrome; TikTok reuses the shared one
+  // Khod gets its own Chrome; TikTok launches a fresh Chrome per account
   const [khodResult, tiktokResult] = await Promise.all([
     runKhod({ member, dateFrom, dateTo, onLog, launchMinimized, cancelToken: token }),
     runTikTok({ member, dateFrom, dateTo, onLog, launchMinimized, cancelToken: token }),
@@ -121,28 +142,16 @@ async function runForMembers({ teamConfig, members, dateFrom, dateTo, onLog, onP
 
   token.throwIfCancelled();
 
+  const maxParallel = (teamConfig.maxParallelMembers && teamConfig.maxParallelMembers > 0)
+    ? teamConfig.maxParallelMembers
+    : 3;
+
   lg(onLog, "info", `🚀 A's Team Bot Starting`);
   lg(onLog, "info", `👥 Members: ${selectedMembers.map(m => m.name).join(", ")}`);
   lg(onLog, "info", `📅 Date: ${dateFrom}${dateTo !== dateFrom ? " → " + dateTo : ""}`);
-  lg(onLog, "info", `⚡ Mode: ALL members in parallel — Khod + TikTok parallel per member`);
-  lg(onLog, "info", `🌐 Chrome: 1 Khod window per member (parallel) + 1 shared TikTok window`);
+  lg(onLog, "info", `⚡ Mode: up to ${maxParallel} member(s) in parallel — Khod + TikTok parallel per member`);
+  lg(onLog, "info", `🌐 Chrome: 1 Khod window per member + 1 fresh TikTok Chrome per account`);
   lg(onLog, "info", ``);
-
-  // ── Does any selected member have TikTok accounts? ──
-  const hasTikTok = selectedMembers.some(m =>
-    (m.tiktokAccounts || []).some(a => a && a.trim() !== "")
-  );
-
-  // ── Init shared TikTok Chrome ONCE — before any member starts ──
-  if (hasTikTok) {
-    lg(onLog, "info", "🌐 Initialising shared TikTok Chrome...");
-    await initSharedChrome(onLog, launchMinimized);
-
-    const sharedPage = _getSharedPage();
-    if (sharedPage) {
-      await confirmInitialLogin(sharedPage, onLog);
-    }
-  }
 
   // ── Emit "starting" progress for every member up front ──
   selectedMembers.forEach((member, i) => {
@@ -155,31 +164,34 @@ async function runForMembers({ teamConfig, members, dateFrom, dateTo, onLog, onP
     });
   });
 
-  // ── Launch ALL members in parallel ──
-  lg(onLog, "info", `\n🚀 Launching all ${selectedMembers.length} member(s) in parallel...`);
+  // ── Launch members via semaphore ──
+  lg(onLog, "info", `\n🚀 Launching ${selectedMembers.length} member(s) with max ${maxParallel} in parallel...`);
+
+  const sem = new Semaphore(maxParallel);
 
   const memberPromises = selectedMembers.map((member, i) =>
-    processMember({
-      member,
-      dateFrom,
-      dateTo,
-      onLog,
-      onProgress,
-      launchMinimized,
-      cancelToken:  token,
-      memberIndex:  i,
-      totalMembers: selectedMembers.length,
-    })
+    (async () => {
+      await sem.acquire();
+      try {
+        return await processMember({
+          member,
+          dateFrom,
+          dateTo,
+          onLog,
+          onProgress,
+          launchMinimized,
+          cancelToken:  token,
+          memberIndex:  i,
+          totalMembers: selectedMembers.length,
+        });
+      } finally {
+        sem.release();
+      }
+    })()
   );
 
   // allSettled — one failure doesn't abort the others
   const settled = await Promise.allSettled(memberPromises);
-
-  // ── Close shared TikTok Chrome after ALL members finish ──
-  if (hasTikTok) {
-    lg(onLog, "info", "🔒 Closing shared TikTok Chrome...");
-    await closeSharedChrome(onLog);
-  }
 
   // ── Collect results ──
   const results = {};
@@ -222,4 +234,14 @@ async function runForMembers({ teamConfig, members, dateFrom, dateTo, onLog, onP
   return results;
 }
 
-module.exports = { runForMembers, CancelToken };
+// ─────────────────────────────────────────────────────────
+// STOP — force-kill all active Chrome contexts immediately
+// ─────────────────────────────────────────────────────────
+async function stopBot(cancelToken, onLog) {
+  if (cancelToken) cancelToken.cancel();
+  lg(onLog, "warn", "⏹ Stop requested — force-closing all active Chrome contexts...");
+  await closeAllActiveContexts(onLog);
+  lg(onLog, "warn", "⏹ All Chrome contexts closed.");
+}
+
+module.exports = { runForMembers, CancelToken, stopBot };
