@@ -1,27 +1,20 @@
 {
   "name": "as-team-dashboard",
-  "version": "1.1.6",
-"description": "A's Team TikTok + Khod-Whaat Analytics Dashboard",  "author": "Abdelrahman Ahmed",
+  "version": "1.0.0",
+  "description": "A's Team TikTok + Khod-Whaat Analytics Dashboard",
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "dist:mac:arm64": "electron-builder --mac --arm64",
-    "dist:mac:x64": "electron-builder --mac --x64",
-    "dist:win": "electron-builder --win"
-  },
-  "dependencies": {
-    "playwright-core": "^1.52.0",
-    "xlsx": "^0.18.5",
-    "electron-store": "^7.0.2",
-    "electron-updater": "^6.3.4"
-  },
-  "devDependencies": {
-    "electron": "^30.0.0",
-    "electron-builder": "^24.13.3"
+    "dist:mac": "electron-builder --mac --x64 && electron-builder --mac --arm64",
+    "dist:win": "electron-builder --win",
+    "dist:all": "electron-builder --mac --win",
+    "release:win": "electron-builder --win --publish always",
+    "release:mac": "electron-builder --mac --publish always",
+    "release:all": "electron-builder --mac --win --publish always"
   },
   "build": {
-    "appId": "com.asteam.app",
+    "appId": "com.asteam.dashboard",
     "productName": "A's Team Dashboard",
     "copyright": "Copyright © 2025",
     "icon": "assets/icon",
@@ -29,7 +22,8 @@
     "publish": {
       "provider": "github",
       "owner": "abdelrahman252",
-      "repo": "a-s-team"
+      "repo": "a-s-team",
+      "releaseType": "release"
     },
     "files": [
       "src/**/*",
@@ -38,12 +32,19 @@
       "!**/*.map",
       "!**/*.md"
     ],
+    "directories": {
+      "output": "dist"
+    },
     "mac": {
-      "category": "public.app-category.productivity",
+      "category": "public.app-category.business",
       "icon": "assets/icon.icns",
       "target": [
-        { "target": "dmg" },
-        { "target": "zip" }
+        {
+          "target": "dmg"
+        },
+        {
+          "target": "zip"
+        }
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
@@ -55,7 +56,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "requestedExecutionLevel": "asInvoker"
@@ -74,14 +83,39 @@
     "dmg": {
       "title": "A's Team Dashboard",
       "background": null,
-      "window": { "width": 540, "height": 380 },
+      "window": {
+        "width": 540,
+        "height": 380
+      },
       "contents": [
-        { "x": 130, "y": 220, "type": "file" },
-        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 220,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "extraResources": [
-      { "from": "assets", "to": "assets" }
+      {
+        "from": "assets",
+        "to": "assets"
+      }
     ]
+  },
+  "dependencies": {
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.3.9",
+    "playwright-core": "^1.52.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.0"
   }
 }
