@@ -190,6 +190,8 @@ const IC={
   play:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
   gear:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
   out:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`,
+  // Cloud-download icon for the auto-update button
+  upd:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>`,
 };
 
 // ════════════════════════════════════════════════════════════════
@@ -227,7 +229,7 @@ function buildShell(page){
     <div class="sb-divider"></div>
     <div class="sb-icon${page==='setup'?' active':''}" title="Settings" onclick="navigate('setup')">${IC.gear}</div>
     <div class="sb-bottom">
-      <div class="sb-icon" id="sbUpdateBtn" title="Check for updates" onclick="checkForUpdatesManual()" style="position:relative;">${IC.out.replace('out','upd') || `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`}<span id="updateDot" style="display:none;position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:#a78bfa;box-shadow:0 0 6px #7b5cf0;"></span></div>
+      <div class="sb-icon" id="sbUpdateBtn" title="Check for updates" onclick="checkForUpdatesManual()" style="position:relative;">${IC.upd}<span id="updateDot" style="display:none;position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:#a78bfa;box-shadow:0 0 6px #7b5cf0;"></span></div>
       <div class="sb-icon" title="Reset Data" onclick="doReset()">${IC.out}</div>
     </div>
   </div>
@@ -802,9 +804,23 @@ window.addEventListener('DOMContentLoaded',async()=>{
 // ════════════════════════════════════════════════════════════════
 //  AUTO-UPDATER UI
 // ════════════════════════════════════════════════════════════════
-let _updateState = 'idle'; // idle | available | downloading | downloaded
+let _updateState = 'idle'; // idle | checking | available | downloading | downloaded | error
+
+// ── Updater logger ──
+function _updLog(level, ...args) {
+  const ts = new Date().toISOString();
+  const prefix = `[AutoUpdate][${ts}]`;
+  if (level === 'error') {
+    console.error(prefix, ...args);
+  } else if (level === 'warn') {
+    console.warn(prefix, ...args);
+  } else {
+    console.log(prefix, ...args);
+  }
+}
 
 function showUpdateToast(title, sub, btnLabel, showProgress) {
+  _updLog('info', `showUpdateToast → title="${title}" btn="${btnLabel}" progress=${showProgress}`);
   const toast = document.getElementById('updateToast');
   const dot   = document.getElementById('updateDot');
   document.getElementById('updateTitle').textContent = title;
@@ -816,44 +832,106 @@ function showUpdateToast(title, sub, btnLabel, showProgress) {
 }
 
 function hideUpdateToast() {
+  _updLog('info', 'hideUpdateToast called');
   const t = document.getElementById('updateToast');
   if(t) t.style.display = 'none';
 }
 
+function _setUpdBtn(loading) {
+  const btn = document.getElementById('sbUpdateBtn');
+  if (!btn) return;
+  btn.style.opacity  = loading ? '0.5' : '1';
+  btn.style.cursor   = loading ? 'wait' : 'pointer';
+  btn.title          = loading ? 'Checking for updates…' : 'Check for updates';
+}
+
 function handleUpdateAction() {
+  _updLog('info', `handleUpdateAction called, state=${_updateState}`);
   if (_updateState === 'available') {
+    _updLog('info', 'Starting update download…');
     _updateState = 'downloading';
     document.getElementById('updateActionBtn').textContent = 'Downloading...';
     document.getElementById('updateActionBtn').disabled = true;
     document.getElementById('updateProgressWrap').style.display = 'block';
     window.api.downloadUpdate();
   } else if (_updateState === 'downloaded') {
+    _updLog('info', 'Requesting install & restart…');
     window.api.installUpdate();
+  } else {
+    _updLog('warn', `handleUpdateAction called in unexpected state: ${_updateState}`);
   }
 }
 
 function checkForUpdatesManual() {
+  _updLog('info', `checkForUpdatesManual called, state=${_updateState}`);
   if (_updateState === 'available' || _updateState === 'downloaded') {
+    _updLog('info', 'Update already found — re-showing toast');
     document.getElementById('updateToast').style.display = 'block';
     return;
   }
-  window.api.checkForUpdates().then(res => {
-    if (res && res.dev) {
-      document.getElementById('updateTitle').textContent = 'Dev Mode';
-      document.getElementById('updateSub').textContent = 'Auto-update only works in packaged app.';
-      document.getElementById('updateActionBtn').textContent = 'OK';
-      document.getElementById('updateActionBtn').onclick = hideUpdateToast;
+  if (_updateState === 'checking' || _updateState === 'downloading') {
+    _updLog('info', `Already in progress (state=${_updateState}), ignoring click`);
+    return;
+  }
+
+  _updateState = 'checking';
+  _setUpdBtn(true);
+  _updLog('info', 'Calling api.checkForUpdates…');
+
+  window.api.checkForUpdates()
+    .then(res => {
+      _updLog('info', 'checkForUpdates resolved:', JSON.stringify(res));
+      _setUpdBtn(false);
+      if (res && res.dev) {
+        _updLog('warn', 'Running in dev/unpackaged mode — auto-update skipped');
+        _updateState = 'idle';
+        document.getElementById('updateTitle').textContent = 'Dev Mode';
+        document.getElementById('updateSub').textContent = 'Auto-update only works in packaged app.';
+        document.getElementById('updateActionBtn').textContent = 'OK';
+        document.getElementById('updateActionBtn').onclick = hideUpdateToast;
+        document.getElementById('updateProgressWrap').style.display = 'none';
+        document.getElementById('updateToast').style.display = 'block';
+        return;
+      }
+      if (res && res.ok === false) {
+        // IPC returned an error object from main process
+        _updLog('error', 'checkForUpdates returned error from main:', res.error);
+        _updateState = 'error';
+        document.getElementById('updateTitle').textContent = 'Update Check Failed';
+        document.getElementById('updateSub').textContent = res.error || 'Unknown error';
+        document.getElementById('updateActionBtn').textContent = 'Dismiss';
+        document.getElementById('updateActionBtn').disabled = false;
+        document.getElementById('updateActionBtn').onclick = () => { _updateState = 'idle'; hideUpdateToast(); };
+        document.getElementById('updateProgressWrap').style.display = 'none';
+        document.getElementById('updateToast').style.display = 'block';
+      }
+      // If ok===true, the autoUpdater events (onUpdateAvailable / onUpdateNotAvailable) fire next
+    })
+    .catch(err => {
+      _updLog('error', 'checkForUpdates IPC threw:', err);
+      _setUpdBtn(false);
+      _updateState = 'error';
+      document.getElementById('updateTitle').textContent = 'Update Check Failed';
+      document.getElementById('updateSub').textContent = err.message || String(err);
+      document.getElementById('updateActionBtn').textContent = 'Dismiss';
+      document.getElementById('updateActionBtn').disabled = false;
+      document.getElementById('updateActionBtn').onclick = () => { _updateState = 'idle'; hideUpdateToast(); };
       document.getElementById('updateProgressWrap').style.display = 'none';
       document.getElementById('updateToast').style.display = 'block';
-    }
-  });
+    });
 }
 
 function initAutoUpdater() {
-  if (!window.api || !window.api.onUpdateAvailable) return;
+  _updLog('info', 'initAutoUpdater — wiring up IPC events');
+  if (!window.api || !window.api.onUpdateAvailable) {
+    _updLog('warn', 'window.api.onUpdateAvailable not found — preload may not have loaded correctly');
+    return;
+  }
 
   window.api.onUpdateAvailable(({ version }) => {
+    _updLog('info', `onUpdateAvailable fired — version=${version}`);
     _updateState = 'available';
+    _setUpdBtn(false);
     document.getElementById('updateTitle').textContent = 'Update v' + version + ' Available';
     document.getElementById('updateSub').textContent   = 'A new version is ready to download.';
     document.getElementById('updateActionBtn').textContent = 'Download Update';
@@ -866,17 +944,24 @@ function initAutoUpdater() {
   });
 
   window.api.onUpdateNotAvailable(() => {
-    if (_updateState !== 'idle') {
+    _updLog('info', `onUpdateNotAvailable fired — state was ${_updateState}`);
+    _setUpdBtn(false);
+    // Show "up to date" only when triggered by a manual check (state=checking), not the silent startup check
+    if (_updateState === 'checking') {
+      _updateState = 'idle';
       document.getElementById('updateTitle').textContent = "You're up to date";
       document.getElementById('updateSub').textContent = 'No new version found.';
       document.getElementById('updateActionBtn').textContent = 'OK';
       document.getElementById('updateActionBtn').onclick = hideUpdateToast;
       document.getElementById('updateProgressWrap').style.display = 'none';
       document.getElementById('updateToast').style.display = 'block';
+    } else {
+      _updateState = 'idle';
     }
   });
 
   window.api.onUpdateProgress(({ percent }) => {
+    _updLog('info', `onUpdateProgress — ${percent}%`);
     const bar   = document.getElementById('updateProgressBar');
     const lbl   = document.getElementById('updateProgressLabel');
     if(bar) bar.style.width = percent + '%';
@@ -887,6 +972,7 @@ function initAutoUpdater() {
   });
 
   window.api.onUpdateDownloaded(() => {
+    _updLog('info', 'onUpdateDownloaded fired — update ready to install');
     _updateState = 'downloaded';
     document.getElementById('updateProgressWrap').style.display = 'none';
     document.getElementById('updateTitle').textContent = 'Update Ready to Install';
@@ -898,10 +984,22 @@ function initAutoUpdater() {
   });
 
   window.api.onUpdateError(({ message }) => {
-    _updateState = 'idle';
-    hideUpdateToast();
-    console.warn('Update error:', message);
+    _updLog('error', `onUpdateError fired — message: ${message}`);
+    _updateState = 'error';
+    _setUpdBtn(false);
+    // Show error in toast instead of silently swallowing it
+    document.getElementById('updateTitle').textContent = 'Update Error';
+    document.getElementById('updateSub').textContent = message || 'An unknown error occurred during update.';
+    document.getElementById('updateActionBtn').textContent = 'Dismiss';
+    document.getElementById('updateActionBtn').disabled = false;
+    document.getElementById('updateActionBtn').onclick = () => { _updateState = 'idle'; hideUpdateToast(); };
+    document.getElementById('updateProgressWrap').style.display = 'none';
+    document.getElementById('updateToast').style.display = 'block';
+    const dot = document.getElementById('updateDot');
+    if(dot) dot.style.display = 'none'; // no update available; hide the notification dot
   });
+
+  _updLog('info', 'initAutoUpdater — all events wired successfully');
 }
 </script>
 </body>

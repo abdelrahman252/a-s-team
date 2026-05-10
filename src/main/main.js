@@ -82,29 +82,62 @@ app.whenReady().then(() => {
 
   // ── Check for updates ~3 seconds after launch (gives window time to load) ──
   if (app.isPackaged) {
-    setTimeout(() => autoUpdater.checkForUpdates(), 3000);
+    setTimeout(() => {
+      updLog('info', 'Startup auto-update check triggered (3s delay)');
+      autoUpdater.checkForUpdates().catch(err => {
+        updLog('error', `Startup checkForUpdates failed: ${err.message}`);
+      });
+    }, 3000);
+  } else {
+    updLog('info', 'Skipping startup update check — app is not packaged');
   }
 });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
+// ════════════════════════════════════════════════════════════════
+// AUTO-UPDATER LOGGER (main process)
+// ════════════════════════════════════════════════════════════════
+function updLog(level, ...args) {
+  const ts = new Date().toISOString();
+  const prefix = `[AutoUpdate][${ts}]`;
+  if (level === 'error') console.error(prefix, ...args);
+  else if (level === 'warn')  console.warn(prefix, ...args);
+  else                        console.log(prefix, ...args);
+}
+
+// Forward log from electron-updater itself
+autoUpdater.logger = {
+  info:  (...a) => updLog('info',  ...a),
+  warn:  (...a) => updLog('warn',  ...a),
+  error: (...a) => updLog('error', ...a),
+  debug: (...a) => updLog('debug', ...a),
+};
+
 // ══════════════════════════════════════════════
 // AUTO-UPDATER EVENTS → forward to renderer
 // ══════════════════════════════════════════════
 
+autoUpdater.on("checking-for-update", () => {
+  updLog('info', 'Checking for update…');
+});
+
 autoUpdater.on("update-available", (info) => {
+  updLog('info', `Update available — version=${info.version} releaseDate=${info.releaseDate}`);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update-available", { version: info.version });
   }
 });
 
-autoUpdater.on("update-not-available", () => {
+autoUpdater.on("update-not-available", (info) => {
+  updLog('info', `No update available — current version is up to date (latestVersion=${info?.version})`);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update-not-available");
   }
 });
 
 autoUpdater.on("download-progress", (progress) => {
+  updLog('info', `Download progress — ${Math.round(progress.percent)}% (${progress.transferred}/${progress.total} bytes, speed=${Math.round(progress.bytesPerSecond)} B/s)`);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update-progress", {
       percent: Math.round(progress.percent),
@@ -114,13 +147,15 @@ autoUpdater.on("download-progress", (progress) => {
   }
 });
 
-autoUpdater.on("update-downloaded", () => {
+autoUpdater.on("update-downloaded", (info) => {
+  updLog('info', `Update downloaded — version=${info.version}, ready to install`);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update-downloaded");
   }
 });
 
 autoUpdater.on("error", (err) => {
+  updLog('error', `AutoUpdater error: ${err.message}`, err.stack || '');
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update-error", { message: err.message });
   }
@@ -220,21 +255,30 @@ ipcMain.handle("stop-bot", () => {
 // ══════════════════════════════════════════════
 
 ipcMain.handle("check-for-updates", async () => {
-  if (!app.isPackaged) return { dev: true };
+  updLog('info', 'IPC check-for-updates received');
+  if (!app.isPackaged) {
+    updLog('warn', 'App is not packaged — skipping update check');
+    return { dev: true };
+  }
   try {
+    updLog('info', 'Calling autoUpdater.checkForUpdates()…');
     await autoUpdater.checkForUpdates();
+    updLog('info', 'autoUpdater.checkForUpdates() resolved OK');
     return { ok: true };
   } catch (e) {
+    updLog('error', `autoUpdater.checkForUpdates() threw: ${e.message}`, e.stack || '');
     return { ok: false, error: e.message };
   }
 });
 
 ipcMain.handle("download-update", () => {
+  updLog('info', 'IPC download-update received — starting download');
   autoUpdater.downloadUpdate();
   return { ok: true };
 });
 
 ipcMain.handle("install-update", () => {
+  updLog('info', 'IPC install-update received — calling quitAndInstall');
   autoUpdater.quitAndInstall(false, true);
 });
 
