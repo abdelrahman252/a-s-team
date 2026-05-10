@@ -10,72 +10,64 @@ permissions:
 
 jobs:
 
-  # ─────────────────────────────────────────────
-  # macOS — runs on macos-latest (Apple Silicon runner)
-  # Builds BOTH arm64 and x64 in one job.
-  # electron-builder publishes artifacts + latest-mac.yml to the GitHub Release.
-  # ─────────────────────────────────────────────
-  build-mac:
-    name: Build macOS (arm64 + x64)
+  # ── arm64 first (your M3 Mac, most important) ──
+  build-mac-arm64:
+    name: Build macOS arm64
     runs-on: macos-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-
       - name: Install dependencies
         run: npm install
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-
-      # Build arm64 first (priority), then x64.
-      # publish=onTagOrDraft lets electron-builder upload to the GitHub Release
-      # that was auto-created when the tag was pushed.
-      - name: Build & publish macOS arm64
-        run: npx electron-builder --mac --arm64 --publish onTagOrDraft
+      - name: Build & publish arm64
+        run: npx electron-builder --mac --arm64 --publish always
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & publish macOS x64
-        run: npx electron-builder --mac --x64 --publish onTagOrDraft
+  # ── x64 in its own isolated job ──
+  build-mac-x64:
+    name: Build macOS x64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm install
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      - name: Build & publish x64
+        run: npx electron-builder --mac --x64 --publish always
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ─────────────────────────────────────────────
-  # Windows — nsis installer only (Setup.exe)
-  # electron-builder publishes artifact + latest.yml to the GitHub Release.
-  # ─────────────────────────────────────────────
+  # ── Windows ──
   build-win:
-    name: Build Windows (x64 Setup.exe)
+    name: Build Windows x64
     runs-on: windows-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-
       - name: Install dependencies
         run: npm install
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-
-      - name: Build & publish Windows x64
-        run: npx electron-builder --win --x64 --publish onTagOrDraft
+      - name: Build & publish Windows
+        run: npx electron-builder --win --x64 --publish always
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
