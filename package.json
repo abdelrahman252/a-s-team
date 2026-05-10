@@ -1,6 +1,6 @@
 {
   "name": "khod-whaat-orders",
-  "version": "1.0.4",
+  "version": "1.1.2",
   "description": "Khod Whaat Orders Automation Bot",
   "author": "Abdelrahman Ahmed",
   "main": "src/main/main.js",
