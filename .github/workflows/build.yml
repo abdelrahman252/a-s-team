@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-mac:
-    name: Build macOS
+    name: Build macOS DMG
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -20,21 +20,87 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
       - name: Install dependencies
         run: npm install
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
-      - name: Build and publish Mac (x64 + arm64)
-        run: npx electron-builder --mac --x64 --arm64 --publish always
+      - name: Build DMG (x64)
+        run: npx electron-builder --mac --x64
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_BUILDER_PUBLISH: never
+
+      - name: Build DMG (arm64)
+        run: npx electron-builder --mac --arm64
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_BUILDER_PUBLISH: never
+
+      - name: Generate latest-mac.yml
+        run: |
+          node -e "
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const path = require('path');
+
+          const version = require('./package.json').version;
+          const distDir = './dist';
+
+          const files = fs.readdirSync(distDir);
+
+          // find arm64 zip and x64 zip
+          const arm64zip = files.find(f => f.endsWith('-arm64-mac.zip'));
+          const x64zip = files.find(f => f.endsWith('-mac.zip') && !f.includes('arm64'));
+
+          function fileInfo(filename) {
+            const filePath = path.join(distDir, filename);
+            const buf = fs.readFileSync(filePath);
+            const sha512 = crypto.createHash('sha512').update(buf).digest('base64');
+            const size = buf.length;
+            return { url: filename, sha512, size };
+          }
+
+          const arm64info = fileInfo(arm64zip);
+          const x64info = fileInfo(x64zip);
+
+          const yml = [
+            'version: ' + version,
+            'files:',
+            '  - url: ' + arm64info.url,
+            '    sha512: ' + arm64info.sha512,
+            '    size: ' + arm64info.size,
+            '    blockMapSize: 0',
+            '  - url: ' + x64info.url,
+            '    sha512: ' + x64info.sha512,
+            '    size: ' + x64info.size,
+            '    blockMapSize: 0',
+            'path: ' + arm64info.url,
+            'sha512: ' + arm64info.sha512,
+            'releaseDate: ' + new Date().toISOString(),
+          ].join('\n');
+
+          fs.writeFileSync(path.join(distDir, 'latest-mac.yml'), yml);
+          console.log('Generated latest-mac.yml');
+          console.log(yml);
+          "
+
+      - name: Upload Mac artifacts to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.zip
+            dist/latest-mac.yml
 
   build-win:
-    name: Build Windows
+    name: Build Windows EXE
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -44,14 +110,52 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
       - name: Install dependencies
         run: npm install
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
-      - name: Build and publish Windows
-        run: npx electron-builder --win --publish always
+      - name: Build EXE
+        run: npm run dist:win
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_BUILDER_PUBLISH: never
+
+      - name: Generate latest.yml
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $distDir = "./dist"
+          $files = Get-ChildItem $distDir
+
+          $setupExe = $files | Where-Object { $_.Name -like "*-setup-*.exe" -and $_.Name -notlike "*.blockmap" } | Select-Object -First 1
+
+          $bytes = [System.IO.File]::ReadAllBytes($setupExe.FullName)
+          $sha512 = [Convert]::ToBase64String([System.Security.Cryptography.SHA512]::Create().ComputeHash($bytes))
+          $size = $setupExe.Length
+
+          $yml = @"
+          version: $version
+          files:
+            - url: $($setupExe.Name)
+              sha512: $sha512
+              size: $size
+              blockMapSize: 0
+          path: $($setupExe.Name)
+          sha512: $sha512
+          releaseDate: $(Get-Date -Format 'o')
+          "@
+
+          $yml | Out-File -FilePath "$distDir/latest.yml" -Encoding utf8
+          Write-Host "Generated latest.yml"
+          Write-Host $yml
+
+      - name: Upload EXE to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.exe
+            dist/latest.yml
