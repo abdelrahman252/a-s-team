@@ -29,7 +29,7 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
       - name: Upload arm64 files to release
-        run: gh release upload ${{ github.event.release.tag_name }} dist/*.dmg dist/*.zip dist/*.blockmap --clobber
+        run: gh release upload ${{ github.event.release.tag_name }} dist/*.dmg dist/*.zip dist/*.blockmap dist/latest-mac.yml --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -53,7 +53,7 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
       - name: Upload x64 files to release
-        run: gh release upload ${{ github.event.release.tag_name }} dist/*.dmg dist/*.zip dist/*.blockmap --clobber
+        run: gh release upload ${{ github.event.release.tag_name }} dist/*.dmg dist/*.zip dist/*.blockmap dist/latest-mac.yml --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -76,7 +76,7 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
       - name: Upload Windows files to release
-        run: gh release upload ${{ github.event.release.tag_name }} (Get-ChildItem dist\*.exe,dist\*.blockmap | ForEach-Object { $_.FullName }) --clobber
+        run: gh release upload ${{ github.event.release.tag_name }} (Get-ChildItem dist\*.exe,dist\*.blockmap,dist\latest.yml | ForEach-Object { $_.FullName }) --clobber
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
