@@ -9,7 +9,7 @@ permissions:
 
 jobs:
 
-  # ── arm64 first (your M3 Mac, most important) ──
+  # ── arm64 ──
   build-mac-arm64:
     name: Build macOS arm64
     runs-on: macos-latest
@@ -23,16 +23,17 @@ jobs:
         run: npm install
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-      - name: Build & publish arm64
-        run: npx electron-builder --mac --arm64 --publish always
+      - name: Build arm64
+        run: npx electron-builder --mac --arm64 --publish never
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Upload arm64 files to release
+        run: gh release upload ${{ github.event.release.tag_name }} dist/*.dmg dist/*.zip dist/*.blockmap --clobber
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EP_DRAFT: false
-          EP_PRE_RELEASE: false
 
-  # ── x64 in its own isolated job ──
+  # ── x64 ──
   build-mac-x64:
     name: Build macOS x64
     runs-on: macos-latest
@@ -46,14 +47,15 @@ jobs:
         run: npm install
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-      - name: Build & publish x64
-        run: npx electron-builder --mac --x64 --publish always
+      - name: Build x64
+        run: npx electron-builder --mac --x64 --publish never
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Upload x64 files to release
+        run: gh release upload ${{ github.event.release.tag_name }} dist/*.dmg dist/*.zip dist/*.blockmap --clobber
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EP_DRAFT: false
-          EP_PRE_RELEASE: false
 
   # ── Windows ──
   build-win:
@@ -69,10 +71,12 @@ jobs:
         run: npm install
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-      - name: Build & publish Windows
-        run: npx electron-builder --win --x64 --publish always
+      - name: Build Windows
+        run: npx electron-builder --win --x64 --publish never
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+      - name: Upload Windows files to release
+        run: gh release upload ${{ github.event.release.tag_name }} (Get-ChildItem dist\*.exe,dist\*.blockmap | ForEach-Object { $_.FullName }) --clobber
+        shell: pwsh
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EP_DRAFT: false
-          EP_PRE_RELEASE: false
