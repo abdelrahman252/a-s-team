@@ -29,6 +29,8 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EP_DRAFT: false
+          EP_PRE_RELEASE: false
 
   # ── x64 in its own isolated job ──
   build-mac-x64:
@@ -50,6 +52,8 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EP_DRAFT: false
+          EP_PRE_RELEASE: false
 
   # ── Windows ──
   build-win:
@@ -70,3 +74,5 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EP_DRAFT: false
+          EP_PRE_RELEASE: false
