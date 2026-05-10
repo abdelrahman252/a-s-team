@@ -1,6 +1,6 @@
 {
   "name": "khod-whaat-orders",
-  "version": "1.1.1",
+  "version": "1.0.4",
   "description": "Khod Whaat Orders Automation Bot",
   "author": "Abdelrahman Ahmed",
   "main": "src/main/main.js",
@@ -30,7 +30,7 @@
     "asar": true,
     "publish": {
       "provider": "github",
-      "owner": "a-s-team",
+      "owner": "abdelrahman252",
       "repo": "a-s-team"
     },
     "files": [
@@ -44,8 +44,20 @@
       "category": "public.app-category.productivity",
       "icon": "assets/icon.icns",
       "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] },
-        { "target": "zip", "arch": ["arm64", "x64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
@@ -57,7 +69,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "requestedExecutionLevel": "asInvoker"
@@ -76,14 +90,29 @@
     "dmg": {
       "title": "Khod Whaat Orders",
       "background": null,
-      "window": { "width": 540, "height": 380 },
+      "window": {
+        "width": 540,
+        "height": 380
+      },
       "contents": [
-        { "x": 130, "y": 220, "type": "file" },
-        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 220,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "extraResources": [
-      { "from": "assets", "to": "assets" }
+      {
+        "from": "assets",
+        "to": "assets"
+      }
     ]
   }
 }
