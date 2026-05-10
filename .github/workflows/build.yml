@@ -1,4 +1,4 @@
-name: Build — Mac & Windows
+name: Build & Release — Mac (arm64 + x64) & Windows
 
 on:
   push:
@@ -9,9 +9,16 @@ permissions:
   contents: write
 
 jobs:
+
+  # ─────────────────────────────────────────────
+  # macOS — runs on macos-latest (Apple Silicon runner)
+  # Builds BOTH arm64 and x64 in one job.
+  # electron-builder publishes artifacts + latest-mac.yml to the GitHub Release.
+  # ─────────────────────────────────────────────
   build-mac:
-    name: Build macOS DMG
+    name: Build macOS (arm64 + x64)
     runs-on: macos-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,51 +34,31 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
-      - name: Build DMG (x64)
-        run: npx electron-builder --mac --x64 -c.publish=never
+      # Build arm64 first (priority), then x64.
+      # publish=onTagOrDraft lets electron-builder upload to the GitHub Release
+      # that was auto-created when the tag was pushed.
+      - name: Build & publish macOS arm64
+        run: npx electron-builder --mac --arm64 --publish onTagOrDraft
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build DMG (arm64)
-        run: npx electron-builder --mac --arm64 -c.publish=never
+      - name: Build & publish macOS x64
+        run: npx electron-builder --mac --x64 --publish onTagOrDraft
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate latest-mac.yml
-        run: |
-          node -e "
-          const fs = require('fs');
-          const crypto = require('crypto');
-          const path = require('path');
-          const version = require('./package.json').version;
-          const distDir = './dist';
-          const files = fs.readdirSync(distDir);
-          const arm64zip = files.find(f => f.endsWith('-arm64-mac.zip'));
-          const x64zip = files.find(f => f.endsWith('-mac.zip') && !f.includes('arm64'));
-          function fileInfo(filename) {
-            const buf = fs.readFileSync(path.join(distDir, filename));
-            return { url: filename, sha512: crypto.createHash('sha512').update(buf).digest('base64'), size: buf.length };
-          }
-          const a = fileInfo(arm64zip);
-          const x = fileInfo(x64zip);
-          const yml = 'version: ' + version + '\nfiles:\n  - url: ' + a.url + '\n    sha512: ' + a.sha512 + '\n    size: ' + a.size + '\n  - url: ' + x.url + '\n    sha512: ' + x.sha512 + '\n    size: ' + x.size + '\npath: ' + a.url + '\nsha512: ' + a.sha512 + '\nreleaseDate: ' + new Date().toISOString();
-          fs.writeFileSync(path.join(distDir, 'latest-mac.yml'), yml);
-          console.log('Done:\n' + yml);
-          "
-
-      - name: Upload Mac artifacts to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.dmg
-            dist/*.zip
-            dist/latest-mac.yml
-
+  # ─────────────────────────────────────────────
+  # Windows — nsis installer only (Setup.exe)
+  # electron-builder publishes artifact + latest.yml to the GitHub Release.
+  # ─────────────────────────────────────────────
   build-win:
-    name: Build Windows EXE
+    name: Build Windows (x64 Setup.exe)
     runs-on: windows-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,29 +74,8 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
-      - name: Build EXE
-        run: npx electron-builder --win -c.publish=never
+      - name: Build & publish Windows x64
+        run: npx electron-builder --win --x64 --publish onTagOrDraft
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-
-      - name: Generate latest.yml
-        shell: pwsh
-        run: |
-          $version = (Get-Content package.json | ConvertFrom-Json).version
-          $distDir = "dist"
-          Get-ChildItem $distDir | ForEach-Object { Write-Host $_.Name }
-          $setupExe = Get-ChildItem $distDir | Where-Object { $_.Name -match "(?i)setup.*\.exe$" -and $_.Name -notlike "*.blockmap" } | Select-Object -First 1
-          Write-Host "Using: $($setupExe.Name)"
-          $bytes = [System.IO.File]::ReadAllBytes($setupExe.FullName)
-          $sha512 = [Convert]::ToBase64String([System.Security.Cryptography.SHA512]::Create().ComputeHash($bytes))
-          $size = $setupExe.Length
-          $yml = "version: $version`nfiles:`n  - url: $($setupExe.Name)`n    sha512: $sha512`n    size: $size`npath: $($setupExe.Name)`nsha512: $sha512`nreleaseDate: $(Get-Date -Format 'o')"
-          $yml | Out-File -FilePath "$distDir/latest.yml" -Encoding utf8NoBOM
-          Write-Host "Generated latest.yml"
-
-      - name: Upload EXE to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.exe
-            dist/latest.yml
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
