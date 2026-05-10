@@ -1,6 +1,6 @@
 {
   "name": "as-team-dashboard",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "A's Team TikTok + Khod-Whaat Analytics Dashboard",
   "main": "src/main/main.js",
   "scripts": {
@@ -16,7 +16,7 @@
   "build": {
     "appId": "com.asteam.dashboard",
     "productName": "A's Team Dashboard",
-    "copyright": "Copyright © 2025",
+    "copyright": "Copyright \u00a9 2025",
     "icon": "assets/icon",
     "asar": true,
     "publish": {
@@ -112,7 +112,8 @@
     "electron-store": "^8.1.0",
     "electron-updater": "^6.3.9",
     "playwright-core": "^1.52.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "electron-log": "^5.1.7"
   },
   "devDependencies": {
     "electron": "^30.0.0",

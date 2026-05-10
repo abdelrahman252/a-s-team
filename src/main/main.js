@@ -1,6 +1,6 @@
 "use strict";
 
-const { app, BrowserWindow, ipcMain, shell, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, Menu, dialog } = require("electron");
 const path   = require("path");
 const Store  = require("electron-store");
 const { autoUpdater } = require("electron-updater");
@@ -8,21 +8,29 @@ const { autoUpdater } = require("electron-updater");
 // ════════════════════════════════════════
 // AUTO-UPDATER CONFIG
 // ════════════════════════════════════════
-autoUpdater.autoDownload    = false; // user clicks "Update" — we don't download behind their back
-autoUpdater.autoInstallOnAppQuit = true; // once downloaded, install silently on next quit
+autoUpdater.autoDownload    = false;
+autoUpdater.autoInstallOnAppQuit = true;
 autoUpdater.allowPrerelease = false;
 
-// ── Logger so errors show up in DevTools console ──
-autoUpdater.logger = {
-  info:  (...a) => console.log("[updater]",  ...a),
-  warn:  (...a) => console.warn("[updater]", ...a),
-  error: (...a) => console.error("[updater]",...a),
-  debug: (...a) => {},
-};
+// ── Full logger — shows in DevTools console AND writes to log file ──
+const log = require("electron-log");
+log.transports.file.level = "debug";
+log.transports.console.level = "debug";
+autoUpdater.logger = log;
 
-// ── Required for PRIVATE GitHub repos ──
-// Create a fine-grained token with read-only access to this repo's contents/releases
-// then paste it here. For PUBLIC repos, delete these 3 lines.
+// ── Helper: show a dialog popup so you always see what happened ──
+function showUpdateDialog(title, message) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title,
+      message,
+      buttons: ["OK"],
+    });
+  }
+}
+
+// ── GitHub feed — token for private repo ──
 autoUpdater.setFeedURL({
   provider: "github",
   owner: "abdelrahman252",
@@ -33,17 +41,11 @@ autoUpdater.setFeedURL({
 
 // ════════════════════════════════════════
 // STARTUP PERFORMANCE FLAGS
-// Must be set before app is ready.
 // ════════════════════════════════════════
-// Disable GPU process sandbox (reduces process spawn overhead on Windows)
 app.commandLine.appendSwitch("disable-gpu-sandbox");
-// Skip GPU info collection on startup (saves ~50–150 ms)
 app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
-// Use hardware acceleration but skip slow software rasterizer fallback
 app.commandLine.appendSwitch("enable-gpu-rasterization");
-// Reduce IPC overhead on renderer startup
 app.commandLine.appendSwitch("renderer-process-limit", "1");
-// V8 code cache: reuse compiled JS across launches (saves 20–60 ms per launch)
 app.commandLine.appendSwitch("js-flags", "--max-old-space-size=256");
 
 // ── Encrypted credential store ──
@@ -70,17 +72,13 @@ function createWindow() {
     backgroundColor: "#0a0b0f",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     frame: true,
-    // PERF: Show window immediately once ready-to-show fires
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      // V8 snapshot: reuse compiled bytecode across launches
       v8CacheOptions: "bypassHeatCheck",
-      // Disable spell check — saves renderer init time for a non-document app
       spellcheck: false,
-      // PERF: Keep running at full speed even when window is hidden/backgrounded
       backgroundThrottling: false,
     },
   });
@@ -100,31 +98,48 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   createWindow();
 
-  // ── Check for updates ~3 seconds after launch (gives window time to load) ──
   if (app.isPackaged) {
-    setTimeout(() => autoUpdater.checkForUpdates(), 3000);
+    setTimeout(() => {
+      log.info("[updater] Starting update check on launch...");
+      autoUpdater.checkForUpdates().catch((err) => {
+        log.error("[updater] checkForUpdates failed:", err);
+        showUpdateDialog("Update Error", "Auto-check failed:\n" + err.message);
+      });
+    }, 3000);
   }
 });
+
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
 // ══════════════════════════════════════════════
-// AUTO-UPDATER EVENTS → forward to renderer
+// AUTO-UPDATER EVENTS
 // ══════════════════════════════════════════════
 
+autoUpdater.on("checking-for-update", () => {
+  log.info("[updater] Checking for update...");
+  // Uncomment the line below if you want a popup every time it checks:
+  // showUpdateDialog("Updater", "Checking for updates...");
+});
+
 autoUpdater.on("update-available", (info) => {
+  log.info("[updater] Update available:", info.version);
+  showUpdateDialog("Update Available", `Version ${info.version} is available!\nClick OK then use the update button to download.`);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update-available", { version: info.version });
   }
 });
 
-autoUpdater.on("update-not-available", () => {
+autoUpdater.on("update-not-available", (info) => {
+  log.info("[updater] No update. Current version is latest:", info.version);
+  showUpdateDialog("No Update", `You are on the latest version (${info.version}).`);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update-not-available");
   }
 });
 
 autoUpdater.on("download-progress", (progress) => {
+  log.info(`[updater] Download progress: ${Math.round(progress.percent)}%`);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update-progress", {
       percent: Math.round(progress.percent),
@@ -135,12 +150,16 @@ autoUpdater.on("download-progress", (progress) => {
 });
 
 autoUpdater.on("update-downloaded", () => {
+  log.info("[updater] Update downloaded, ready to install.");
+  showUpdateDialog("Update Ready", "Update downloaded! It will install when you close the app.");
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update-downloaded");
   }
 });
 
 autoUpdater.on("error", (err) => {
+  log.error("[updater] Error:", err);
+  showUpdateDialog("Update Error", "Updater error:\n" + err.message);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update-error", { message: err.message });
   }
@@ -172,7 +191,6 @@ ipcMain.handle("has-config", () => {
   return !!store.get("teamConfig", null);
 });
 
-// ── Launch Minimized setting (persisted separately from team config) ──
 ipcMain.handle("set-launch-minimized", (_e, val) => {
   store.set("launchMinimized", val);
   return true;
@@ -188,7 +206,6 @@ ipcMain.handle("run-bot", async (_e, { members, dateFrom, dateTo }) => {
   const teamConfig = store.get("teamConfig", null);
   if (!teamConfig) return { ok: false, error: "No config saved" };
 
-  // Import bot runner lazily so it doesn't block app startup
   const { runForMembers, CancelToken } = require("../bot/runner");
 
   const onLog = (log) => {
@@ -203,7 +220,6 @@ ipcMain.handle("run-bot", async (_e, { members, dateFrom, dateTo }) => {
     }
   };
 
-  // Create a fresh cancel token for this run
   const cancelToken = new CancelToken();
   activeCancelToken = cancelToken;
 
@@ -240,11 +256,17 @@ ipcMain.handle("stop-bot", () => {
 // ══════════════════════════════════════════════
 
 ipcMain.handle("check-for-updates", async () => {
-  if (!app.isPackaged) return { dev: true };
+  if (!app.isPackaged) {
+    showUpdateDialog("Updater", "Running in dev mode — updater is disabled.\nBuild and install the app to test updates.");
+    return { dev: true };
+  }
   try {
+    log.info("[updater] Manual check triggered from renderer");
     await autoUpdater.checkForUpdates();
     return { ok: true };
   } catch (e) {
+    log.error("[updater] Manual check failed:", e);
+    showUpdateDialog("Update Error", "Check failed:\n" + e.message);
     return { ok: false, error: e.message };
   }
 });
