@@ -1,8 +1,7 @@
 {
-  "name": "khod-whaat-orders",
+  "name": "as-team-dashboard",
   "version": "1.1.6",
-  "description": "Khod Whaat Orders Automation Bot",
-  "author": "Abdelrahman Ahmed",
+"description": "A's Team TikTok + Khod-Whaat Analytics Dashboard",  "author": "Abdelrahman Ahmed",
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
@@ -22,8 +21,8 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.khodbot.app",
-    "productName": "Khod Whaat Orders",
+    "appId": "com.asteam.app",
+    "productName": "A's Team Dashboard",
     "copyright": "Copyright © 2025",
     "icon": "assets/icon",
     "asar": true,
@@ -70,10 +69,10 @@
       "installerHeaderIcon": "assets/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Khod Whaat Orders"
+      "shortcutName": "A's Team Dashboard"
     },
     "dmg": {
-      "title": "Khod Whaat Orders",
+      "title": "A's Team Dashboard",
       "background": null,
       "window": { "width": 540, "height": 380 },
       "contents": [
