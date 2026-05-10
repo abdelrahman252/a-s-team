@@ -1,6 +1,6 @@
 {
   "name": "as-team-dashboard",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "description": "A's Team TikTok + Khod-Whaat Analytics Dashboard",
   "main": "src/main/main.js",
   "scripts": {
@@ -81,6 +81,9 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "A's Team Dashboard"
+    },
+    "portable": {
+      "artifactName": "A.s.Team.Dashboard.Portable.${version}.${ext}"
     },
     "dmg": {
       "title": "A's Team Dashboard",
