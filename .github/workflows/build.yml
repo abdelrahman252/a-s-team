@@ -49,46 +49,20 @@ jobs:
           const fs = require('fs');
           const crypto = require('crypto');
           const path = require('path');
-
           const version = require('./package.json').version;
           const distDir = './dist';
-
           const files = fs.readdirSync(distDir);
-
-          // find arm64 zip and x64 zip
           const arm64zip = files.find(f => f.endsWith('-arm64-mac.zip'));
           const x64zip = files.find(f => f.endsWith('-mac.zip') && !f.includes('arm64'));
-
           function fileInfo(filename) {
-            const filePath = path.join(distDir, filename);
-            const buf = fs.readFileSync(filePath);
-            const sha512 = crypto.createHash('sha512').update(buf).digest('base64');
-            const size = buf.length;
-            return { url: filename, sha512, size };
+            const buf = fs.readFileSync(path.join(distDir, filename));
+            return { url: filename, sha512: crypto.createHash('sha512').update(buf).digest('base64'), size: buf.length };
           }
-
-          const arm64info = fileInfo(arm64zip);
-          const x64info = fileInfo(x64zip);
-
-          const yml = [
-            'version: ' + version,
-            'files:',
-            '  - url: ' + arm64info.url,
-            '    sha512: ' + arm64info.sha512,
-            '    size: ' + arm64info.size,
-            '    blockMapSize: 0',
-            '  - url: ' + x64info.url,
-            '    sha512: ' + x64info.sha512,
-            '    size: ' + x64info.size,
-            '    blockMapSize: 0',
-            'path: ' + arm64info.url,
-            'sha512: ' + arm64info.sha512,
-            'releaseDate: ' + new Date().toISOString(),
-          ].join('\n');
-
+          const a = fileInfo(arm64zip);
+          const x = fileInfo(x64zip);
+          const yml = 'version: ' + version + '\nfiles:\n  - url: ' + a.url + '\n    sha512: ' + a.sha512 + '\n    size: ' + a.size + '\n  - url: ' + x.url + '\n    sha512: ' + x.sha512 + '\n    size: ' + x.size + '\npath: ' + a.url + '\nsha512: ' + a.sha512 + '\nreleaseDate: ' + new Date().toISOString();
           fs.writeFileSync(path.join(distDir, 'latest-mac.yml'), yml);
-          console.log('Generated latest-mac.yml');
-          console.log(yml);
+          console.log('Done:\n' + yml);
           "
 
       - name: Upload Mac artifacts to Release
@@ -117,41 +91,25 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
-      - name: Build EXE
-        run: npm run dist:win
+      - name: Build EXE and generate latest.yml
+        run: npx electron-builder --win --publish never
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ELECTRON_BUILDER_PUBLISH: never
 
-      - name: Generate latest.yml
+      - name: Generate latest.yml manually
         shell: pwsh
         run: |
           $version = (Get-Content package.json | ConvertFrom-Json).version
-          $distDir = "./dist"
-          $files = Get-ChildItem $distDir
-
-          $setupExe = $files | Where-Object { $_.Name -like "*-setup-*.exe" -and $_.Name -notlike "*.blockmap" } | Select-Object -First 1
-
+          $distDir = "dist"
+          $setupExe = Get-ChildItem $distDir | Where-Object { $_.Name -match "setup.*\.exe$" -and $_.Name -notlike "*.blockmap" } | Select-Object -First 1
+          Write-Host "Found: $($setupExe.Name)"
           $bytes = [System.IO.File]::ReadAllBytes($setupExe.FullName)
           $sha512 = [Convert]::ToBase64String([System.Security.Cryptography.SHA512]::Create().ComputeHash($bytes))
           $size = $setupExe.Length
-
-          $yml = @"
-          version: $version
-          files:
-            - url: $($setupExe.Name)
-              sha512: $sha512
-              size: $size
-              blockMapSize: 0
-          path: $($setupExe.Name)
-          sha512: $sha512
-          releaseDate: $(Get-Date -Format 'o')
-          "@
-
-          $yml | Out-File -FilePath "$distDir/latest.yml" -Encoding utf8
-          Write-Host "Generated latest.yml"
-          Write-Host $yml
+          $yml = "version: $version`nfiles:`n  - url: $($setupExe.Name)`n    sha512: $sha512`n    size: $size`npath: $($setupExe.Name)`nsha512: $sha512`nreleaseDate: $(Get-Date -Format 'o')"
+          $yml | Out-File -FilePath "$distDir/latest.yml" -Encoding utf8NoBOM
+          Write-Host "Generated latest.yml:`n$yml"
 
       - name: Upload EXE to Release
         uses: softprops/action-gh-release@v2
