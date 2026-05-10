@@ -1,6 +1,6 @@
 {
   "name": "as-team-dashboard",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "description": "A's Team TikTok + Khod-Whaat Analytics Dashboard",
   "main": "src/main/main.js",
   "scripts": {
