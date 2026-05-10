@@ -1,6 +1,6 @@
 {
   "name": "as-team-dashboard",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "description": "A's Team TikTok + Khod-Whaat Analytics Dashboard",
   "main": "src/main/main.js",
   "scripts": {
@@ -39,6 +39,7 @@
       "category": "public.app-category.business",
       "icon": "assets/icon.icns",
       "artifactName": "A.s.Team.Dashboard-${version}-${arch}-mac.${ext}",
+      "identity": null,
       "target": [
         {
           "target": "dmg"

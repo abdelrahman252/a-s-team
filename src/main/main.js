@@ -11,6 +11,11 @@ const { autoUpdater } = require("electron-updater");
 autoUpdater.autoDownload    = false; // user clicks "Update" — we don't download behind their back
 autoUpdater.autoInstallOnAppQuit = true; // once downloaded, install silently on next quit
 
+// Disable code signature verification on Mac (app is not signed with Apple certificate)
+if (process.platform === "darwin") {
+  autoUpdater.verifyUpdateCodeSignature = false;
+}
+
 // ════════════════════════════════════════
 // STARTUP PERFORMANCE FLAGS
 // Must be set before app is ready.
