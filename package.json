@@ -1,6 +1,6 @@
 {
   "name": "as-team-dashboard",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "A's Team TikTok + Khod-Whaat Analytics Dashboard",
   "main": "src/main/main.js",
   "scripts": {
@@ -38,6 +38,7 @@
     "mac": {
       "category": "public.app-category.business",
       "icon": "assets/icon.icns",
+      "artifactName": "A.s.Team.Dashboard-${version}-${arch}-mac.${ext}",
       "target": [
         {
           "target": "dmg"
@@ -53,6 +54,7 @@
     },
     "win": {
       "icon": "assets/icon.ico",
+      "artifactName": "A.s.Team.Dashboard.Setup.${version}.${ext}",
       "target": [
         {
           "target": "nsis",
