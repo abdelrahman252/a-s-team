@@ -28,20 +28,16 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
       - name: Build DMG (x64)
-        run: npx electron-builder --mac --x64
+        run: npx electron-builder --mac --x64 -c.publish=never
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ELECTRON_BUILDER_PUBLISH: never
 
       - name: Build DMG (arm64)
-        run: npx electron-builder --mac --arm64
+        run: npx electron-builder --mac --arm64 -c.publish=never
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
           CSC_IDENTITY_AUTO_DISCOVERY: false
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ELECTRON_BUILDER_PUBLISH: never
 
       - name: Generate latest-mac.yml
         run: |
@@ -91,25 +87,25 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
 
-      - name: Build EXE and generate latest.yml
-        run: npx electron-builder --win --publish never
+      - name: Build EXE
+        run: npx electron-builder --win -c.publish=never
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate latest.yml manually
+      - name: Generate latest.yml
         shell: pwsh
         run: |
           $version = (Get-Content package.json | ConvertFrom-Json).version
           $distDir = "dist"
-          $setupExe = Get-ChildItem $distDir | Where-Object { $_.Name -match "setup.*\.exe$" -and $_.Name -notlike "*.blockmap" } | Select-Object -First 1
-          Write-Host "Found: $($setupExe.Name)"
+          Get-ChildItem $distDir | ForEach-Object { Write-Host $_.Name }
+          $setupExe = Get-ChildItem $distDir | Where-Object { $_.Name -match "(?i)setup.*\.exe$" -and $_.Name -notlike "*.blockmap" } | Select-Object -First 1
+          Write-Host "Using: $($setupExe.Name)"
           $bytes = [System.IO.File]::ReadAllBytes($setupExe.FullName)
           $sha512 = [Convert]::ToBase64String([System.Security.Cryptography.SHA512]::Create().ComputeHash($bytes))
           $size = $setupExe.Length
           $yml = "version: $version`nfiles:`n  - url: $($setupExe.Name)`n    sha512: $sha512`n    size: $size`npath: $($setupExe.Name)`nsha512: $sha512`nreleaseDate: $(Get-Date -Format 'o')"
           $yml | Out-File -FilePath "$distDir/latest.yml" -Encoding utf8NoBOM
-          Write-Host "Generated latest.yml:`n$yml"
+          Write-Host "Generated latest.yml"
 
       - name: Upload EXE to Release
         uses: softprops/action-gh-release@v2
