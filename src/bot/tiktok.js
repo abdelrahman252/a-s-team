@@ -3,29 +3,31 @@
 /**
  * tiktok.js — TikTok Ads spend scraper
  *
+ * CHROME MODEL (v2):
+ * ──────────────────
+ *  Each TikTok account ID gets its OWN Chrome launch → scrape → close.
+ *  No shared page, no mutex, no race conditions.
+ *  Clean slate every time — TikTok can't get confused between accounts.
+ *  Session cookies are preserved via the persistent profile "tiktok-shared"
+ *  so login survives across launches.
+ *
+ * WAIT-FOR-TABLE STRATEGY:
+ * ────────────────────────
+ *  "—" (dash) = page still loading. NEVER treat as zero.
+ *  "0.00 SAR"  = real zero. Only accept when currency symbol is present.
+ *  We poll until we see an actual number WITH a currency symbol (SAR/USD/EGP/AED).
+ *  Only after full timeout (35s) with no currency found do we give up.
+ *
  * SHADOW DOM STRATEGY — NO SUFFIX SELECTORS EVER:
  * ─────────────────────────────────────────────────
  *  TikTok's component suffix (e.g. -1-1-14, -1-1-19) changes between accounts
- *  and deployments. ALL selectors use suffix-free approaches only:
- *    • data-testid attributes
- *    • CSS class names (.date-grid-body__date-item, .picker-core__popup-footer-append etc.)
- *    • tag name PATTERNS (el.tagName.toLowerCase().includes("display-field"))
- *    • icon tag names (ks-icon-chevron-right — icons have NO suffix, they are stable)
- *    • [class*='KsButton'] partial class match
- *    • text content ("Confirm")
- *
- * CALENDAR LAYOUT:
- *  Dual-panel picker — LEFT shows earlier month, RIGHT shows later month.
- *  LEFT panel:  .date-grid-header__controls (visible ←), --hidden class on right controls
- *  RIGHT panel: .date-grid-header__controls (visible →), --hidden class on left controls
- *  Always click the arrow inside a NON-hidden controls group.
+ *  and deployments. ALL selectors use suffix-free approaches only.
  */
 
 const { launchChrome, closeChrome } = require("./browser");
 
-const TT_LOGIN_URL = "https://ads.tiktok.com/i18n/login";
-const MONTH_NAMES  = ["January","February","March","April","May","June",
-                      "July","August","September","October","November","December"];
+const MONTH_NAMES = ["January","February","March","April","May","June",
+                     "July","August","September","October","November","December"];
 
 function lg(onLog, type, msg) { onLog({ type, msg }); }
 
@@ -34,39 +36,6 @@ function parseSpend(text) {
   const m = text.replace(/,/g, "").match(/[\d]+\.?\d*/);
   const v = m ? parseFloat(m[0]) : 0;
   return isNaN(v) ? 0 : v;
-}
-
-// ════════════════════════════════════════════════════════
-// SHARED CHROME STATE + MUTEX
-// ════════════════════════════════════════════════════════
-
-let _sharedContext = null;
-let _sharedPage    = null;
-let _tiktokMutexTail = Promise.resolve();
-
-async function withTiktokLock(fn) {
-  let release;
-  const acquired = new Promise(res => { release = res; });
-  const previous = _tiktokMutexTail;
-  _tiktokMutexTail = previous.then(() => acquired);
-  await previous;
-  try { return await fn(); } finally { release(); }
-}
-
-async function initSharedChrome(onLog, launchMinimized) {
-  if (_sharedContext && _sharedPage) return;
-  _tiktokMutexTail = Promise.resolve();
-  const { context, page } = await launchChrome(onLog, "tiktok-shared", launchMinimized);
-  _sharedContext = context;
-  _sharedPage    = page;
-}
-
-async function closeSharedChrome(onLog) {
-  if (_sharedContext) {
-    await closeChrome(_sharedContext, onLog);
-    _sharedContext = null;
-    _sharedPage    = null;
-  }
 }
 
 // ════════════════════════════════════════════════════════
@@ -96,8 +65,6 @@ async function ensureSession(page, onLog, contextLabel) {
 
 async function confirmInitialLogin(page, onLog) {
   lg(onLog, "info", "🔑 Checking TikTok session...");
-  // Navigate to the ads dashboard — if session is alive it stays there,
-  // if expired TikTok redirects us to the login page.
   await page.goto("https://ads.tiktok.com/i18n/dashboard", { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForTimeout(1500);
   if (!isLoginUrl(page.url())) {
@@ -108,13 +75,12 @@ async function confirmInitialLogin(page, onLog) {
 }
 
 // ════════════════════════════════════════════════════════
-// OPEN DATE PICKER — suffix-free
+// OPEN DATE PICKER
 // ════════════════════════════════════════════════════════
 
 async function openDatePicker(page, onLog) {
   lg(onLog, "info", "   🗓️  Opening date picker...");
 
-  // Try 1: any element whose tag name contains "display-field" → click its shadow button
   let clicked = await page.evaluate(() => {
     function walk(root) {
       for (const el of root.querySelectorAll("*")) {
@@ -130,15 +96,11 @@ async function openDatePicker(page, onLog) {
   });
   lg(onLog, "info", `   🗓️  Try 1 (display-field tag): ${clicked}`);
 
-  // Try 2: data-testid containing "display-field"
   if (!clicked) {
     clicked = await page.evaluate(() => {
       function walk(root) {
         for (const el of root.querySelectorAll("[data-testid*='display-field']")) {
-          if (el.shadowRoot) {
-            const btn = el.shadowRoot.querySelector("button");
-            if (btn) { btn.click(); return true; }
-          }
+          if (el.shadowRoot) { const btn = el.shadowRoot.querySelector("button"); if (btn) { btn.click(); return true; } }
           el.click(); return true;
         }
         for (const el of root.querySelectorAll("*")) {
@@ -151,7 +113,6 @@ async function openDatePicker(page, onLog) {
     lg(onLog, "info", `   🗓️  Try 2 (display-field testid): ${clicked}`);
   }
 
-  // Try 3: shadow button whose text contains a month name (date display)
   if (!clicked) {
     clicked = await page.evaluate(() => {
       function walk(root) {
@@ -172,7 +133,6 @@ async function openDatePicker(page, onLog) {
     lg(onLog, "info", `   🗓️  Try 3 (shadow month-text button): ${clicked}`);
   }
 
-  // Try 4: element with class containing "picker" 
   if (!clicked) {
     clicked = await page.evaluate(() => {
       const el = document.querySelector("[class*='picker--'], [class*='KsDateRange']");
@@ -199,8 +159,7 @@ async function openDatePicker(page, onLog) {
 }
 
 // ════════════════════════════════════════════════════════
-// GET CURRENT MONTH/YEAR — reads LEFT panel label buttons
-// Uses only stable class names
+// GET CURRENT MONTH/YEAR
 // ════════════════════════════════════════════════════════
 
 async function getCurrentMonthYear(page) {
@@ -226,9 +185,6 @@ async function getCurrentMonthYear(page) {
 
 // ════════════════════════════════════════════════════════
 // NAVIGATE TO TARGET MONTH
-// Uses: tag name pattern for header elements, stable class names for control groups,
-//       ks-icon-chevron-left/right (icon tags have NO suffix — stable),
-//       [class*='KsIconButton'] for the button wrapper
 // ════════════════════════════════════════════════════════
 
 async function navigateToMonth(page, targetYear, targetMonth, onLog) {
@@ -244,46 +200,30 @@ async function navigateToMonth(page, targetYear, targetMonth, onLog) {
 
     const moved = await page.evaluate((goBack) => {
       const iconTag = goBack ? "ks-icon-chevron-left" : "ks-icon-chevron-right";
-
-      // Find the shadow root of a header element, then find a VISIBLE control group
-      // containing the target icon, then click its button wrapper.
       function tryInHeaderShadow(shadow) {
         const groups = shadow.querySelectorAll(".date-grid-header__controls");
         for (const group of groups) {
-          // Skip hidden groups — this is the key fix for dual-panel layout
           if (group.classList.contains("date-grid-header__controls--hidden")) continue;
           const icon = group.querySelector(iconTag);
           if (!icon) continue;
-          // The icon is inside a wrapper whose tag we don't know (suffix varies).
-          // Find by class attribute partial match — [class*='KsIconButton'] is stable.
           const wrapper = icon.closest("[class*='KsIconButton']");
           if (wrapper && wrapper.shadowRoot) {
             const btn = wrapper.shadowRoot.querySelector("button");
             if (btn) { btn.click(); return true; }
           }
-          // Fallback: walk up to find any ancestor with a shadowRoot containing a button
           let node = icon.parentElement;
           while (node) {
-            if (node.shadowRoot) {
-              const btn = node.shadowRoot.querySelector("button");
-              if (btn) { btn.click(); return true; }
-            }
+            if (node.shadowRoot) { const btn = node.shadowRoot.querySelector("button"); if (btn) { btn.click(); return true; } }
             node = node.parentElement;
           }
-          // Last resort: click the icon element itself
           icon.click(); return true;
         }
         return false;
       }
-
-      // Single-pass recursive walk: for every element, if it's a date-grid-header
-      // try clicking its shadow arrow; ALSO recurse into its shadow root either way
-      // so nothing buried deeper gets missed.
       function walk(root) {
         for (const el of root.querySelectorAll("*")) {
           if (el.tagName && el.tagName.toLowerCase().includes("date-grid-header") && el.shadowRoot) {
             if (tryInHeaderShadow(el.shadowRoot)) return true;
-            // Still recurse in case headers are nested (shouldn't happen but safe)
             if (walk(el.shadowRoot)) return true;
           } else if (el.shadowRoot) {
             if (walk(el.shadowRoot)) return true;
@@ -291,7 +231,6 @@ async function navigateToMonth(page, targetYear, targetMonth, onLog) {
         }
         return false;
       }
-
       return walk(document);
     }, goBack);
 
@@ -302,23 +241,19 @@ async function navigateToMonth(page, targetYear, targetMonth, onLog) {
 
 // ════════════════════════════════════════════════════════
 // CLICK A SPECIFIC DAY
-// Uses: .date-grid-body__date-item class, data-testid suffix match, text content
 // ════════════════════════════════════════════════════════
 
 async function clickDay(page, day, targetMonth, targetYear, onLog) {
   const dayStr = String(day);
   lg(onLog, "info", `   🗓️  Clicking day ${dayStr} (${MONTH_NAMES[targetMonth]} ${targetYear})...`);
 
-  // Try 1: class-based, text match, not outside current period
   let clicked = await page.evaluate((dayStr) => {
     function walk(root) {
       const items = root.querySelectorAll(".date-grid-body__date-item");
       for (const item of items) {
-        const t   = item.textContent.trim();
+        const t = item.textContent.trim();
         const cls = item.className || "";
-        if (t === dayStr && !cls.includes("outside-current-period")) {
-          item.click(); return true;
-        }
+        if (t === dayStr && !cls.includes("outside-current-period")) { item.click(); return true; }
       }
       for (const el of root.querySelectorAll("*")) {
         if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
@@ -329,16 +264,13 @@ async function clickDay(page, day, targetMonth, targetYear, onLog) {
   }, dayStr);
   lg(onLog, "info", `   🗓️  Day click try 1 (class+text): ${clicked}`);
 
-  // Try 2: data-testid ending with the day number
   if (!clicked) {
     clicked = await page.evaluate((dayStr) => {
       function walk(root) {
         const items = root.querySelectorAll(`[data-testid$="-${dayStr}"]`);
         for (const item of items) {
           const cls = item.className || "";
-          if (!cls.includes("outside-current-period") && !cls.includes("decorative")) {
-            item.click(); return true;
-          }
+          if (!cls.includes("outside-current-period") && !cls.includes("decorative")) { item.click(); return true; }
         }
         for (const el of root.querySelectorAll("*")) {
           if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
@@ -356,50 +288,11 @@ async function clickDay(page, day, targetMonth, targetYear, onLog) {
 
 // ════════════════════════════════════════════════════════
 // CLICK CONFIRM
-//
-// From HTML: .picker-core__popup-footer > .picker-core__popup-footer-append
-//              [class*='KsButton'][data-testid="core-index-xpDLeJ"] = Cancel  (first)
-//              [class*='KsButton'][data-testid="core-index-g1HneZ"] = Confirm (last)
-//                shadowRoot > <button>Confirm</button>
-//
-// RULES: NEVER click by suffix tag. NEVER click page-level buttons.
-//        ALWAYS stay scoped inside .picker-core__popup-footer-append or .picker-core__popup.
 // ════════════════════════════════════════════════════════
 
 async function clickConfirm(page, onLog) {
   lg(onLog, "info", "   🗓️  Clicking Confirm...");
 
-  // Helper: find .picker-core__popup-footer-append by walking all shadow roots
-  // This is the stable container — class name never changes.
-  function findFooterAppend(root) {
-    const el = root.querySelector(".picker-core__popup-footer-append");
-    if (el) return el;
-    for (const c of root.querySelectorAll("*")) {
-      if (c.shadowRoot) { const r = findFooterAppend(c.shadowRoot); if (r) return r; }
-    }
-    return null;
-  }
-
-  // Helper: given a footer element, click the element whose shadow/text says "Confirm".
-  // Never clicks by position alone without a text check.
-  function clickConfirmInFooter(footer) {
-    // Collect all direct children that could be buttons (any tag with KsButton class)
-    const candidates = [...footer.querySelectorAll("[class*='KsButton']")];
-    for (const el of candidates) {
-      if ((el.textContent || "").trim() === "Confirm") {
-        const btn = el.shadowRoot ? el.shadowRoot.querySelector("button") : null;
-        if (btn) { btn.click(); return "ksbutton-shadow"; }
-        el.click(); return "ksbutton-host";
-      }
-    }
-    // Also check plain <button> elements (in case shadow not used)
-    for (const btn of footer.querySelectorAll("button")) {
-      if ((btn.textContent || "").trim() === "Confirm") { btn.click(); return "plain-button"; }
-    }
-    return null;
-  }
-
-  // Try 1: footer-append → any KsButton/button with text "Confirm"
   let clicked = await page.evaluate(() => {
     function findFooter(root) {
       const el = root.querySelector(".picker-core__popup-footer-append");
@@ -423,11 +316,9 @@ async function clickConfirm(page, onLog) {
     }
     return null;
   });
-  lg(onLog, "info", `   🗓️  Confirm try 1 (footer-append + text Confirm): ${clicked}`);
+  lg(onLog, "info", `   🗓️  Confirm try 1: ${clicked}`);
   if (clicked && clicked !== "no-footer") { await page.waitForTimeout(500); return; }
 
-  // Try 2: find .picker-core__popup, walk its entire subtree (including shadow roots)
-  //         for any element with text "Confirm" — scoped so we never leave the popup
   clicked = await page.evaluate(() => {
     function findPopup(root) {
       const el = root.querySelector(".picker-core__popup");
@@ -457,11 +348,9 @@ async function clickConfirm(page, onLog) {
     if (!popup) return "no-popup";
     return findConfirm(popup);
   });
-  lg(onLog, "info", `   🗓️  Confirm try 2 (picker-popup text walk): ${clicked}`);
+  lg(onLog, "info", `   🗓️  Confirm try 2: ${clicked}`);
   if (clicked && clicked !== "no-popup") { await page.waitForTimeout(500); return; }
 
-  // Try 3: walk ALL shadow roots globally, find any [class*='KsButton'] with text "Confirm",
-  //         verify it sits inside the picker popup by climbing the shadow host chain
   clicked = await page.evaluate(() => {
     function insidePickerPopup(el) {
       let node = el;
@@ -490,7 +379,7 @@ async function clickConfirm(page, onLog) {
     }
     return walk(document);
   });
-  lg(onLog, "info", `   🗓️  Confirm try 3 (global scoped KsButton): ${clicked}`);
+  lg(onLog, "info", `   🗓️  Confirm try 3: ${clicked}`);
   if (clicked) { await page.waitForTimeout(500); return; }
 
   lg(onLog, "warn", "   🗓️  ⚠️  All Confirm tries failed — date may not be applied");
@@ -533,108 +422,104 @@ async function setDateRange(page, dateFrom, dateTo, onLog) {
 }
 
 // ════════════════════════════════════════════════════════
-// READ SPEND — no suffix selectors anywhere
+// WAIT FOR TABLE — SMART VERSION
+//
+// THE RULE:
+//   "—" (dash) → page is STILL LOADING → keep waiting
+//   "0.00 SAR" → real zero, page done → accept it
+//   "1,234 SAR" → has spend → accept it
+//
+// We only trust the value once a currency symbol appears.
+// Timeout is 35 seconds. After that, one last full-page scan.
 // ════════════════════════════════════════════════════════
 
 async function waitForTable(page, ms, onLog) {
-  lg(onLog, "info", "   💰 Waiting for table to load...");
+  lg(onLog, "info", "   💰 Waiting for real value (SAR/currency) in spend slot...");
   const start = Date.now();
+
   while (Date.now() - start < ms) {
     if (isLoginUrl(page.url())) {
       lg(onLog, "warn", "   ⚠️ Redirected to login while waiting for table");
-      return "login";
+      return { status: "login" };
     }
+
     const found = await page.evaluate(() => {
-      if (document.querySelector("tfoot")) return "tfoot";
-      function walk(root) {
-        if (root.querySelector("[slot='footer-stat_cost']")) return "slot";
+      const CURRENCY_RE = /[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/;
+
+      function getSpendText(root) {
+        // Primary: the named footer slot for spend
+        const slot = root.querySelector('[slot="footer-stat_cost"]');
+        if (slot) {
+          const t = slot.textContent?.trim();
+          if (t) return t;
+        }
+        // Walk shadow roots
         for (const el of root.querySelectorAll("*")) {
+          if (el.shadowRoot) {
+            const t = getSpendText(el.shadowRoot);
+            if (t) return t;
+          }
+        }
+        return null;
+      }
+
+      const text = getSpendText(document);
+      if (!text) return { ready: false, text: null, reason: "slot-missing" };
+
+      // Currency found = table fully loaded
+      if (CURRENCY_RE.test(text)) return { ready: true, text };
+
+      // Still a dash or spinner = still loading
+      return { ready: false, text, reason: "no-currency-yet" };
+    });
+
+    if (found.ready) {
+      lg(onLog, "ok", `   💰 Table loaded ✅  value: "${found.text}"`);
+      return { status: "ready", text: found.text };
+    }
+
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    lg(onLog, "info", `   💰 Still loading... slot="${found.text || "empty"}" (${elapsed}s elapsed)`);
+    await page.waitForTimeout(800);
+  }
+
+  lg(onLog, "warn", `   💰 ${ms/1000}s timeout — no currency value appeared in slot`);
+  return { status: "timeout" };
+}
+
+// ════════════════════════════════════════════════════════
+// READ SPEND
+// ════════════════════════════════════════════════════════
+
+async function readSpend(page, onLog) {
+  const tableResult = await waitForTable(page, 35000, onLog);
+
+  if (tableResult.status === "login") return "SESSION_EXPIRED";
+
+  if (tableResult.status === "timeout") {
+    // Last-ditch: scan whole page for any leaf element with a currency value
+    lg(onLog, "info", "   💰 Last-ditch full-page currency scan...");
+    const fallback = await page.evaluate(() => {
+      const CURRENCY_RE = /[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/;
+      function walk(root) {
+        for (const el of root.querySelectorAll("*")) {
+          const t = el.textContent?.trim() || "";
+          if (CURRENCY_RE.test(t) && el.children.length === 0) return t;
           if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
         }
         return null;
       }
       return walk(document);
     });
-    if (found) { lg(onLog, "info", `   💰 Table found (${found})`); return found; }
-    await page.waitForTimeout(600);
-  }
-  lg(onLog, "warn", `   💰 Table not found after ${ms/1000}s`);
-  return null;
-}
-
-async function readSpend(page, onLog) {
-  const tableResult = await waitForTable(page, 25000, onLog);
-  if (tableResult === "login") return "SESSION_EXPIRED";
-
-  lg(onLog, "info", "   💰 Reading spend...");
-
-  // Try 1: div[slot="footer-stat_cost"] — find any leaf child with text
-  let result = await page.evaluate(() => {
-    const slotDiv = document.querySelector('div[slot="footer-stat_cost"]');
-    if (!slotDiv) return { found: false, method: "no-slot-div" };
-    for (const child of slotDiv.querySelectorAll("*")) {
-      const t = child.textContent?.trim();
-      if (t && t !== "—") return { found: true, text: t, method: "slot-child-text" };
+    if (fallback) {
+      lg(onLog, "ok", `   💰 Last-ditch found: "${fallback}"`);
+      return parseSpend(fallback);
     }
-    const t = slotDiv.textContent?.trim();
-    return (t && t !== "—") ? { found: true, text: t, method: "slot-div-text" } : { found: false, method: "empty-slot" };
-  });
-  lg(onLog, "info", `   💰 Try 1 (slot div): found=${result.found} method=${result.method} text="${result.text || ""}"`);
-  if (result.found && result.text && result.text !== "—") return parseSpend(result.text);
-
-  // Try 2: shadow walk for [slot="footer-stat_cost"]
-  result = await page.evaluate(() => {
-    function walk(root) {
-      const slot = root.querySelector('[slot="footer-stat_cost"]');
-      if (slot) {
-        const t = slot.textContent?.trim();
-        if (t && t !== "—") return { found: true, text: t, method: "shadow-slot" };
-      }
-      for (const el of root.querySelectorAll("*")) {
-        if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
-      }
-      return { found: false };
-    }
-    return walk(document);
-  });
-  lg(onLog, "info", `   💰 Try 2 (shadow walk slot): found=${result.found} text="${result.text || ""}"`);
-  if (result.found && result.text) return parseSpend(result.text);
-
-  // Try 3: tfoot with data-testid or slot containing "stat_cost"
-  result = await page.evaluate(() => {
-    const tfoot = document.querySelector("tfoot");
-    if (!tfoot) return { found: false, method: "no-tfoot" };
-    const th = tfoot.querySelector('[data-testid*="stat_cost"], [slot*="stat_cost"]');
-    if (th) return { found: true, text: th.textContent?.trim(), method: "tfoot-testid" };
-    const ths = [...tfoot.querySelectorAll("th")];
-    const texts = ths.map(t => t.textContent?.trim()).filter(Boolean);
-    return { found: texts.length > 0, text: texts.join(" | "), method: "tfoot-all-ths" };
-  });
-  lg(onLog, "info", `   💰 Try 3 (tfoot): found=${result.found} text="${result.text || ""}"`);
-  if (result.found && result.text) {
-    const m = result.text.match(/[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/);
-    if (m) return parseSpend(m[0]);
+    lg(onLog, "warn", "   💰 Nothing found — returning 0");
+    return 0;
   }
 
-  // Try 4: any leaf element with currency pattern (tag-agnostic, no suffix)
-  result = await page.evaluate(() => {
-    function walk(root) {
-      for (const el of root.querySelectorAll("*")) {
-        const t = el.textContent?.trim() || "";
-        if (/[\d,]+\.?\d*\s*(SAR|USD|EGP|AED)/.test(t) && el.children.length === 0) {
-          return { found: true, text: t, method: "leaf-currency" };
-        }
-        if (el.shadowRoot) { const r = walk(el.shadowRoot); if (r) return r; }
-      }
-      return { found: false };
-    }
-    return walk(document);
-  });
-  lg(onLog, "info", `   💰 Try 4 (leaf currency): found=${result.found} text="${result.text || ""}"`);
-  if (result.found && result.text) return parseSpend(result.text);
-
-  lg(onLog, "warn", "   💰 All spend methods failed — using 0");
-  return 0;
+  return parseSpend(tableResult.text);
 }
 
 // ════════════════════════════════════════════════════════
@@ -648,18 +533,15 @@ async function waitForCampaignsPage(page, aadvid, onLog) {
 
   while (Date.now() < deadline) {
     const url = page.url();
-
     if (isLoginUrl(url)) {
       lg(onLog, "warn", "   ⚠️ TikTok redirected to login — session expired");
       await ensureSession(page, onLog, `account ${aadvid || "?"}`);
       return false;
     }
-
     if (Date.now() - lastLog > 5000) {
       lg(onLog, "info", `   🌐 URL: ${url.slice(0, 90)}`);
       lastLog = Date.now();
     }
-
     if (!aadvid || url.includes(aadvid)) {
       const pickerFound = await page.evaluate(() => {
         function walk(root) {
@@ -673,14 +555,12 @@ async function waitForCampaignsPage(page, aadvid, onLog) {
         }
         return walk(document);
       });
-
       if (pickerFound) {
-        lg(onLog, "ok", "   ✅ Campaigns page ready — date picker found");
+        lg(onLog, "ok", "   ✅ Campaigns page ready");
         return true;
       }
       lg(onLog, "info", "   🌐 On campaigns page but picker not ready yet...");
     }
-
     await page.waitForTimeout(2000);
   }
   lg(onLog, "warn", "   ⚠️ Campaigns page wait timed out — trying anyway");
@@ -688,7 +568,7 @@ async function waitForCampaignsPage(page, aadvid, onLog) {
 }
 
 // ════════════════════════════════════════════════════════
-// SCRAPE ONE ACCOUNT
+// SCRAPE ONE ACCOUNT (reuses an already-open page)
 // ════════════════════════════════════════════════════════
 
 async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
@@ -697,18 +577,11 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
   let cleanUrl = accountUrl;
   let aadvid = null;
   try {
-    // Support two input formats:
-    //   1. Plain numeric ID:  "7336115641021349890"
-    //   2. Full URL:          "https://ads.tiktok.com/i18n/manage/campaign?aadvid=73361..."
-    // In both cases we build a clean minimal URL with just the aadvid param,
-    // so TikTok always lands on the current state of that account.
     const trimmed = accountUrl.trim();
     if (/^\d+$/.test(trimmed)) {
-      // Plain numeric ID — build the URL directly
       aadvid   = trimmed;
       cleanUrl = `https://ads.tiktok.com/i18n/manage/campaign?aadvid=${aadvid}`;
     } else {
-      // Full URL — extract aadvid from query string
       const u = new URL(trimmed);
       aadvid   = u.searchParams.get("aadvid");
       cleanUrl = aadvid
@@ -741,10 +614,9 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
     await waitForCampaignsPage(page, aadvid, onLog);
   }
 
-  lg(onLog, "info", "   📅 Setting date range...");
   await setDateRange(page, dateFrom, dateTo, onLog);
 
-  // Guard: if Confirm accidentally navigated to campaign creation, recover
+  // Guard: accidental navigation to campaign creation
   const postDateUrl = page.url();
   if (postDateUrl.includes("/creation/") || postDateUrl.includes("/create/campaign")) {
     lg(onLog, "warn", `   ⚠️ Accidental navigation to campaign creation! Recovering...`);
@@ -753,11 +625,9 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
     await page.goto(cleanUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForTimeout(800);
     await waitForCampaignsPage(page, aadvid, onLog);
-    lg(onLog, "info", "   📅 Re-setting date range...");
     await setDateRange(page, dateFrom, dateTo, onLog);
   }
 
-  lg(onLog, "info", "   💰 Reading spend...");
   let spend = await readSpend(page, onLog);
 
   if (spend === "SESSION_EXPIRED") {
@@ -779,60 +649,81 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
 }
 
 // ════════════════════════════════════════════════════════
-// MAIN — per-member entry point
+// SCRAPE ONE ACCOUNT WITH ITS OWN CHROME
+//
+// Launch Chrome → check session → scrape → close Chrome.
+// Each account is fully isolated. No shared state, no cracking.
+// The persistent profile "tiktok-shared" keeps the login cookie
+// alive between launches so you don't need to re-login each time.
 // ════════════════════════════════════════════════════════
 
-async function runTikTok({ member, dateFrom, dateTo, onLog, launchMinimized, sharedPage, cancelToken }) {
+async function scrapeAccountWithOwnChrome(accountUrl, dateFrom, dateTo, onLog, launchMinimized) {
+  const label = accountUrl.trim().slice(0, 50);
+  lg(onLog, "info", `\n🚀 Launching Chrome for: ${label}`);
+
+  const { context, page } = await launchChrome(onLog, "tiktok-shared", launchMinimized);
+  try {
+    await confirmInitialLogin(page, onLog);
+    const spend = await scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog);
+    return spend;
+  } finally {
+    lg(onLog, "info", `🔒 Closing Chrome for: ${label}`);
+    await closeChrome(context, onLog);
+  }
+}
+
+// ════════════════════════════════════════════════════════
+// MAIN — per-member entry point
+//
+// Accounts scraped ONE BY ONE.
+// Each gets: launch Chrome → scrape → close Chrome → next.
+// ════════════════════════════════════════════════════════
+
+async function runTikTok({ member, dateFrom, dateTo, onLog, launchMinimized, cancelToken }) {
   const fromDate = new Date(dateFrom);
   const toDate   = new Date(dateTo || dateFrom);
 
   const accounts = (member.tiktokAccounts || []).filter(a => a && a.trim() !== "");
   if (accounts.length === 0) {
-    lg(onLog, "warn", `⚠️ No TikTok accounts for ${member.name}`);
+    lg(onLog, "warn", `⚠️ No TikTok accounts configured for ${member.name} — skipping`);
     return { success: true, memberId: member.id, totalSpend: 0 };
   }
 
   lg(onLog, "info", `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  lg(onLog, "info", `🎵 TikTok: ${member.name} — ${accounts.length} account(s) [waiting for shared page...]`);
+  lg(onLog, "info", `🎵 TikTok: ${member.name} — ${accounts.length} account(s)`);
+  lg(onLog, "info", `   Mode: 1 account → own Chrome → close → next`);
   lg(onLog, "info", `   Date: ${fromDate.toDateString()} → ${toDate.toDateString()}`);
 
-  return withTiktokLock(async () => {
-    const page = sharedPage || _sharedPage;
-    if (!page) throw new Error("TikTok: shared Chrome page not initialised — call initSharedChrome first");
+  try {
+    let totalSpend = 0;
 
-    lg(onLog, "info", `🎵 TikTok: ${member.name} — acquired shared page, scraping now`);
-
-    try {
+    for (let i = 0; i < accounts.length; i++) {
       if (cancelToken && cancelToken.cancelled) {
-        lg(onLog, "warn", "⏹ Stop requested — TikTok skipping scrape.");
-        return { success: true, memberId: member.id, totalSpend: 0 };
-      }
-      let totalSpend = 0;
-      for (let i = 0; i < accounts.length; i++) {
-        if (cancelToken && cancelToken.cancelled) {
-          lg(onLog, "warn", "⏹ Stop requested — TikTok stopping account loop.");
-          break;
-        }
-        lg(onLog, "info", `\n🎵 ── Account ${i + 1}/${accounts.length} ──`);
-        try {
-          const spend = await scrapeAccount(page, accounts[i], fromDate, toDate, onLog);
-          totalSpend += (typeof spend === "number" ? spend : 0);
-          lg(onLog, "ok", `🎵 Account ${i + 1}: ${spend} | Total so far: ${totalSpend}`);
-        } catch (err) {
-          lg(onLog, "warn", `⚠️ Account ${i + 1} error: ${err.message} — using 0`);
-        }
+        lg(onLog, "warn", "⏹ Stop requested — TikTok stopping.");
+        break;
       }
 
-      lg(onLog, "ok", `✅ TikTok total for ${member.name}: ${totalSpend}`);
-      return { success: true, memberId: member.id, totalSpend };
+      lg(onLog, "info", `\n🎵 ── Account ${i + 1} of ${accounts.length} ──`);
 
-    } catch (err) {
-      lg(onLog, "error", `❌ TikTok fatal [${member.name}]: ${err.message}`);
-      return { success: false, memberId: member.id, totalSpend: 0, error: err.message };
+      try {
+        const spend = await scrapeAccountWithOwnChrome(
+          accounts[i], fromDate, toDate, onLog, launchMinimized
+        );
+        const numeric = typeof spend === "number" ? spend : 0;
+        totalSpend += numeric;
+        lg(onLog, "ok", `🎵 Account ${i + 1}: ${numeric} | Running total: ${totalSpend}`);
+      } catch (err) {
+        lg(onLog, "warn", `⚠️ Account ${i + 1} failed: ${err.message} — using 0`);
+      }
     }
-  });
+
+    lg(onLog, "ok", `✅ TikTok total for ${member.name}: ${totalSpend}`);
+    return { success: true, memberId: member.id, totalSpend };
+
+  } catch (err) {
+    lg(onLog, "error", `❌ TikTok fatal [${member.name}]: ${err.message}`);
+    return { success: false, memberId: member.id, totalSpend: 0, error: err.message };
+  }
 }
 
-function _getSharedPage() { return _sharedPage; }
-
-module.exports = { runTikTok, initSharedChrome, closeSharedChrome, confirmInitialLogin, _getSharedPage };
+module.exports = { runTikTok };
