@@ -10,8 +10,9 @@
  *
  * SEQUENTIAL SAFETY:
  * ──────────────────
- *  600ms settle after close so the OS releases the SingletonLock
- *  before the next sequential TikTok launch touches the profile.
+ *  2000ms settle after close so the OS fully releases the SingletonLock
+ *  before the next sequential TikTok launch touches the profile (Mac is slow).
+ *  500ms pre-launch pause before clearing locks for the same reason.
  *  On kill, we skip the settle — speed is the priority.
  *
  * STALE LOCK RETRY:
@@ -22,7 +23,6 @@
 
 const { chromium } = require("playwright-core");
 const path = require("path");
-const os   = require("fs");
 const fs   = require("fs");
 
 // ─────────────────────────────────────────────────
@@ -116,11 +116,16 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
   }
 
   try { fs.mkdirSync(profileDir, { recursive: true }); } catch {}
+  // Small pause before clearing locks — gives the previous Chrome process
+  // time to fully exit on Mac before we touch the profile directory.
+  await new Promise(r => setTimeout(r, 500));
   clearStaleProfileLocks(profileDir);
 
   onLog({ type: "info", msg: `🌐 Launching Chrome (fast mode)...` });
   onLog({ type: "info", msg: `📁 Profile : ${profileDir}` });
   onLog({ type: "info", msg: `🧭 Binary  : ${chromePath}` });
+
+  const isMac = process.platform === "darwin";
 
   const LAUNCH_OPTS = {
     executablePath: chromePath,
@@ -149,7 +154,9 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
       "--disable-v8-idle-tasks",
       "--force-device-scale-factor=1",
       "--window-size=1280,800",
-      ...(launchMinimized ? ["--window-position=-32000,-32000"] : []),
+      // On Mac: always launch off-screen to avoid window flash and dock interference.
+      // On Windows: only move off-screen when launchMinimized is ON.
+      ...(launchMinimized || isMac ? ["--window-position=-32000,-32000"] : []),
       "--disable-infobars",
       "--disable-notifications",
       "--lang=en-US",
@@ -196,7 +203,11 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
 
   const page = context.pages()[0] || (await context.newPage());
 
-  if (launchMinimized) {
+  if (launchMinimized && !isMac) {
+    // Windows only: use CDP to minimize the window properly.
+    // On Mac we already launched off-screen via --window-position so no CDP needed —
+    // CDP setWindowBounds on Mac triggers the OS window manager which can
+    // accidentally minimize the Electron app window too.
     try {
       const cdp = await context.newCDPSession(page);
       const { windowId } = await cdp.send("Browser.getWindowForTarget");
@@ -207,6 +218,8 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
     } catch (e) {
       onLog({ type: "info", msg: `⚠️ Could not minimize Chrome window: ${e.message}` });
     }
+  } else if (launchMinimized && isMac) {
+    onLog({ type: "ok", msg: "🪟 Chrome launched off-screen (Mac mode)" });
   } else {
     try { await page.bringToFront(); } catch {}
   }
@@ -216,13 +229,14 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
 }
 
 // ─────────────────────────────────────────────────
-// CLOSE — graceful + 600ms OS settle
+// CLOSE — graceful + 2000ms OS settle (Mac needs more time)
 // ─────────────────────────────────────────────────
 async function closeChrome(context, onLog) {
   openContexts.delete(context);
   try { if (context) await context.close(); } catch {}
-  // Give OS time to release the SingletonLock before the next launch
-  await new Promise(r => setTimeout(r, 600));
+  // Give OS time to fully release the profile locks before the next launch.
+  // Mac is slow to release SingletonLock — 2s is safe, 600ms was not enough.
+  await new Promise(r => setTimeout(r, 2000));
   onLog({ type: "info", msg: "🔒 Browser closed" });
 }
 
