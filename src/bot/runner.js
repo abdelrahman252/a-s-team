@@ -167,8 +167,8 @@ async function runForMembers({ teamConfig, members, dateFrom, dateTo, onLog, onP
   lg(onLog, "info", `🚀 A's Team Bot Starting`);
   lg(onLog, "info", `👥 Members: ${selectedMembers.map(m => m.name).join(", ")}`);
   lg(onLog, "info", `📅 Date: ${dateFrom}${dateTo !== dateFrom ? " → " + dateTo : ""}`);
-  lg(onLog, "info", `⚡ Mode: Khod (all members parallel) + TikTok (all accounts sequential) — both run at the same time`);
-  lg(onLog, "info", `🌐 Khod: 1 Chrome per member (parallel) | TikTok: 1 Chrome per account (sequential, never overlapping)`);
+  lg(onLog, "info", `⚡ Mode: TikTok first (sequential) → then Khod (all members parallel)`);
+  lg(onLog, "info", `🌐 TikTok: 1 Chrome per account (sequential) | Khod: 1 Chrome per member (parallel, after TikTok done)`);
   lg(onLog, "info", ``);
 
   // Emit "starting" progress for every member up front
@@ -194,8 +194,18 @@ async function runForMembers({ teamConfig, members, dateFrom, dateTo, onLog, onP
     }
   }
 
-  // ── Launch BOTH phases simultaneously ──────────────────
-  lg(onLog, "info", `\n🚀 Launching ${selectedMembers.length} Khod runner(s) + ${accountQueue.length} TikTok account(s) simultaneously...`);
+  // ── Phase 1: TikTok first (fully sequential, no Khod Chrome running) ──
+  lg(onLog, "info", `\n🎵 Step 1/2 — Running TikTok queue first (${accountQueue.length} account(s))...`);
+  lg(onLog, "info", `⚡ Mode: TikTok sequential → then Khod parallel (no shared-profile conflict)`);
+
+  const spendByMemberRaw = accountQueue.length > 0
+    ? await runTikTokQueue({ accountQueue, dateFrom, dateTo, onLog, launchMinimized, cancelToken: token })
+    : {};
+
+  token.throwIfCancelled();
+
+  // ── Phase 2: Khod — all members in parallel, TikTok is fully done ──
+  lg(onLog, "info", `\n🚀 Step 2/2 — Launching ${selectedMembers.length} Khod runner(s) in parallel...`);
 
   const khodPromises = selectedMembers.map((member, i) =>
     processKhod({
@@ -211,15 +221,8 @@ async function runForMembers({ teamConfig, members, dateFrom, dateTo, onLog, onP
     })
   );
 
-  const tiktokPromise = accountQueue.length > 0
-    ? runTikTokQueue({ accountQueue, dateFrom, dateTo, onLog, launchMinimized, cancelToken: token })
-    : Promise.resolve({});
-
-  // Wait for BOTH to finish before assembling results
-  const [khodSettled, spendByMemberRaw] = await Promise.all([
-    Promise.allSettled(khodPromises),
-    tiktokPromise,
-  ]);
+  // Wait for all Khod runners to finish
+  const khodSettled = await Promise.allSettled(khodPromises);
 
   // Build khodResults map: memberId → khodResult
   const khodResultMap = {};
