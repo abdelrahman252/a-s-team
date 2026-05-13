@@ -229,7 +229,7 @@ function buildShell(page){
     <div class="sb-divider"></div>
     <div class="sb-icon${page==='setup'?' active':''}" title="Settings" onclick="navigate('setup')">${IC.gear}</div>
     <div class="sb-bottom">
-      <div class="sb-icon" id="sbUpdateBtn" title="Check for updatesssssssssssssssdsssdsadsadasdasdsadasdsssssssssss" onclick="checkForUpdatesManual()" style="position:relative;">${IC.upd}<span id="updateDot" style="display:none;position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:#a78bfa;box-shadow:0 0 6px #7b5cf0;"></span></div>
+      <div class="sb-icon" id="sbUpdateBtn" title="Check for updates" onclick="checkForUpdatesManual()" style="position:relative;">${IC.upd}<span id="updateDot" style="display:none;position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:#a78bfa;box-shadow:0 0 6px #7b5cf0;"></span></div>
       <div class="sb-icon" title="Reset Data" onclick="doReset()">${IC.out}</div>
     </div>
   </div>
@@ -599,9 +599,9 @@ function buildRunningContent(){
 async function handleStopBot(){
   const btn=document.getElementById('stopBtn');if(btn){btn.disabled=true;btn.textContent='Stopping...';}
   await window.api.stopBot();
-  if(btn){btn.disabled=false;btn.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg> Waiting...';}
-  const st=document.getElementById('runStatus');if(st){st.textContent='\u23F9 Stop requested \u2014 finishing current step...';st.style.color='var(--text2)';}
-  const ph=document.getElementById('runPhase');if(ph){ph.textContent='The browser will close once the current action completes.';}
+  // UI reflects immediate kill — no "finishing current step" messaging
+  const st=document.getElementById('runStatus');if(st){st.textContent='\u23F9 Stopped — closing all browsers...';st.style.color='var(--text2)';}
+  const ph=document.getElementById('runPhase');if(ph){ph.textContent='All Chrome windows are being closed now.';}
 }
 
 function initRunning(params){
