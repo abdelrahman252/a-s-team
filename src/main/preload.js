@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld("api", {
   downloadUpdate:     ()    => ipcRenderer.invoke("download-update"),
   installUpdate:      ()    => ipcRenderer.invoke("install-update"),
 
+  // Cache / troubleshooting
+  clearAppCache:      ()    => ipcRenderer.invoke("clear-app-cache"),
+
   // Auto-updater events (renderer listens)
   onUpdateAvailable:    (cb) => ipcRenderer.on("update-available",     (_e, info) => cb(info)),
   onUpdateNotAvailable: (cb) => ipcRenderer.on("update-not-available", () => cb()),

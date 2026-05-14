@@ -265,13 +265,23 @@ async function runKhod({ member, dateFrom, dateTo, onLog, launchMinimized, cance
       }
 
       // Wait for redirect away from login (up to 5 min — handles 2FA / manual login)
-      const deadline = Date.now() + 5 * 60 * 1000;
+      // Use event-driven waitForURL instead of a polling loop with fixed 1500ms sleep.
+      // waitForURL fires the moment the URL changes — zero unnecessary waiting.
       let confirmed = false;
-      while (Date.now() < deadline) {
-        await page.waitForTimeout(1500);
+      try {
+        await page.waitForURL(
+          url => !url.includes("/login") && !url.includes("/auth"),
+          { timeout: 5 * 60 * 1000 }
+        );
+        confirmed = true;
+      } catch {
+        // Timeout — check URL one last time before giving up
         const u = page.url();
-        if (!u.includes("/login") && !u.includes("/auth")) { confirmed = true; break; }
-        lg(onLog, "info", `⏳ Waiting for login (${Math.ceil((deadline - Date.now()) / 60000)}m left)...`);
+        confirmed = !u.includes("/login") && !u.includes("/auth");
+        if (!confirmed) {
+          // Log remaining time context for the user
+          lg(onLog, "warn", `⏳ Login wait timed out — still on login page`);
+        }
       }
       if (!confirmed) throw new Error(`Khod login timeout for ${member.name}`);
       lg(onLog, "ok", "✅ Khod login confirmed");

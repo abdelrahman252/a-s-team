@@ -154,9 +154,13 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
       "--disable-v8-idle-tasks",
       "--force-device-scale-factor=1",
       "--window-size=1280,800",
-      // On Mac: always launch off-screen to avoid window flash and dock interference.
-      // On Windows: only move off-screen when launchMinimized is ON.
-      ...(launchMinimized || isMac ? ["--window-position=-32000,-32000"] : []),
+      // Only go off-screen when launchMinimized is explicitly ON.
+      // On Mac, NEVER use --window-position=-32000,-32000 unconditionally —
+      // macOS suspends rendering for off-screen windows, causing ERR_ABORTED on
+      // the very first page.goto(). Windows is fine with extreme positions.
+      // Mac off-screen uses -4000,-4000 (just beyond any realistic display) which
+      // is far enough to be invisible but close enough that macOS doesn't suspend it.
+      ...(launchMinimized ? (isMac ? ["--window-position=-4000,-4000"] : ["--window-position=-32000,-32000"]) : []),
       "--disable-infobars",
       "--disable-notifications",
       "--lang=en-US",
@@ -203,11 +207,11 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
 
   const page = context.pages()[0] || (await context.newPage());
 
-  if (launchMinimized && !isMac) {
-    // Windows only: use CDP to minimize the window properly.
-    // On Mac we already launched off-screen via --window-position so no CDP needed —
-    // CDP setWindowBounds on Mac triggers the OS window manager which can
-    // accidentally minimize the Electron app window too.
+  if (launchMinimized) {
+    // Minimize Chrome window via CDP — works on both Windows and Mac.
+    // Previously Mac skipped this and relied on --window-position=-32000,-32000,
+    // but that position caused macOS to suspend rendering → ERR_ABORTED.
+    // CDP minimize is the correct approach on both platforms.
     try {
       const cdp = await context.newCDPSession(page);
       const { windowId } = await cdp.send("Browser.getWindowForTarget");
@@ -218,8 +222,6 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
     } catch (e) {
       onLog({ type: "info", msg: `⚠️ Could not minimize Chrome window: ${e.message}` });
     }
-  } else if (launchMinimized && isMac) {
-    onLog({ type: "ok", msg: "🪟 Chrome launched off-screen (Mac mode)" });
   } else {
     try { await page.bringToFront(); } catch {}
   }

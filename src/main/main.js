@@ -20,15 +20,29 @@ if (process.platform === "darwin") {
 // STARTUP PERFORMANCE FLAGS
 // Must be set before app is ready.
 // ════════════════════════════════════════
-// Disable GPU process sandbox (reduces process spawn overhead on Windows)
-app.commandLine.appendSwitch("disable-gpu-sandbox");
-// Skip GPU info collection on startup (saves ~50–150 ms)
+const _isMac = process.platform === "darwin";
+const _isWin = process.platform === "win32";
+
+// disable-gpu-sandbox: Windows only.
+// On Mac (especially Apple Silicon) the GPU sandbox provides crash isolation.
+// Removing it on Mac causes GPU process instability and blank windows.
+if (_isWin) {
+  app.commandLine.appendSwitch("disable-gpu-sandbox");
+}
+
+// Skip GPU shader disk cache on startup (safe on all platforms — saves 50–150ms)
 app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
-// Use hardware acceleration but skip slow software rasterizer fallback
-app.commandLine.appendSwitch("enable-gpu-rasterization");
-// Reduce IPC overhead on renderer startup
-app.commandLine.appendSwitch("renderer-process-limit", "1");
-// V8 code cache: reuse compiled JS across launches (saves 20–60 ms per launch)
+
+// enable-gpu-rasterization: Windows only.
+// On Mac, GPU rasterization is already the default and forcing it can conflict
+// with macOS's own GPU scheduling, causing jank and compositor stalls.
+if (_isWin) {
+  app.commandLine.appendSwitch("enable-gpu-rasterization");
+}
+
+// V8 code cache: safe on all platforms (saves 20–60ms per launch)
+// NOTE: renderer-process-limit=1 was removed — it causes Electron window flicker/minimize
+// loops on Mac because Chrome and Electron fight for the single renderer slot.
 app.commandLine.appendSwitch("js-flags", "--max-old-space-size=256");
 
 // ── Encrypted credential store ──
@@ -289,4 +303,42 @@ ipcMain.handle("install-update", () => {
 
 ipcMain.handle("get-app-version", () => {
   return app.getVersion();
+});
+
+// ══════════════════════════════════════════════
+// IPC — CLEAR APP CACHE
+// Flushes Electron's renderer cache + browser profile locks.
+// Useful on Mac when the app gets into a bad state.
+// ══════════════════════════════════════════════
+
+ipcMain.handle("clear-app-cache", async () => {
+  try {
+    // 1. Flush Electron's own renderer session cache
+    const { session } = require("electron");
+    await session.defaultSession.clearCache();
+    await session.defaultSession.clearStorageData({
+      storages: ["shadercache", "serviceworkers", "cachestorage"],
+    });
+
+    // 2. Clear stale Chrome profile lock files (SingletonLock etc.)
+    const { getProfileDir } = require("../bot/browser");
+    const profilesToClean = ["tiktok-shared", "khod-shared", "default"];
+    const profileResults = [];
+    for (const key of profilesToClean) {
+      const dir = getProfileDir(key);
+      const locks = ["SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"];
+      let cleared = 0;
+      for (const f of locks) {
+        try {
+          require("fs").unlinkSync(require("path").join(dir, f));
+          cleared++;
+        } catch {}
+      }
+      profileResults.push(`${key}: ${cleared} lock(s) cleared`);
+    }
+
+    return { ok: true, details: ["Renderer cache cleared", ...profileResults] };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });
