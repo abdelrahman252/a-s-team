@@ -27,12 +27,42 @@ const MONTH_NAMES   = ["January","February","March","April","May","June","July",
 
 function lg(onLog, type, msg) { onLog({ type, msg }); }
 
+function normalizeDigits(value) {
+  return String(value ?? "")
+    .replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
+    .replace(/[۰-۹]/g, d => "۰۱۲۳۴۵۶۷۸۹".indexOf(d));
+}
+
+function parseNumber(val) {
+  if (val === null || val === undefined || val === "") return 0;
+  if (typeof val === "number") return Number.isFinite(val) ? val : 0;
+  const s = normalizeDigits(val)
+    .replace(/,/g, "")
+    .replace(/[^\d.-]/g, "");
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
 // ── Parse date from sheet cell ──
 function parseKhodDate(val) {
   if (!val) return null;
   if (val instanceof Date) return val;
-  if (typeof val === "number") return new Date(Math.round((val - 25569) * 86400 * 1000));
-  const d = new Date(String(val).trim());
+  if (typeof val === "number") {
+    if (val < 20000 || val > 80000) return null;
+    return new Date(Math.round((val - 25569) * 86400 * 1000));
+  }
+  const s = normalizeDigits(val).trim();
+  const dmy = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})(?:\s+|$)/);
+  if (dmy) {
+    const day = parseInt(dmy[1], 10);
+    const month = parseInt(dmy[2], 10) - 1;
+    let year = parseInt(dmy[3], 10);
+    if (year < 100) year += 2000;
+    const parsed = new Date(year, month, day);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+  if (/^\d+(\.\d+)?$/.test(s)) return null;
+  const d = new Date(s);
   return isNaN(d.getTime()) ? null : d;
 }
 
@@ -45,24 +75,77 @@ function inRange(dateVal, from, to) {
   return day >= start && day <= end;
 }
 
-function parseSheet(buffer, dateFrom, dateTo, isDelivered) {
+function findBestDateColumn(rows) {
+  let bestCol = 19;
+  let bestScore = 0;
+  const maxCols = Math.max(30, ...rows.slice(0, 20).map(r => r?.length || 0));
+
+  for (let col = 0; col < maxCols; col++) {
+    let score = 0;
+    for (let i = 1; i < Math.min(rows.length, 60); i++) {
+      if (parseKhodDate(rows[i]?.[col])) score++;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestCol = col;
+    }
+  }
+
+  return { col: bestCol, score: bestScore };
+}
+
+function findColumnByHeader(rows, patterns, fallback) {
+  const headerRows = rows.slice(0, 3);
+  for (const row of headerRows) {
+    for (let i = 0; i < (row?.length || 0); i++) {
+      const text = String(row[i] || "").toLowerCase();
+      if (patterns.some(p => p.test(text))) return i;
+    }
+  }
+  return fallback;
+}
+
+function parseSheet(buffer, dateFrom, dateTo, isDelivered, onLog) {
   const wb   = XLSX.read(buffer, { type: "buffer", cellDates: true });
   const ws   = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
 
   let totalOrders = 0, qtySum = 0, qtyCount = 0, sumT = 0, tahseelCount = 0;
+  const dataRows = rows.slice(1).filter(row => row && row.some(cell => cell !== ""));
+  const dateGuess = findBestDateColumn(rows);
+  const dateCol = dateGuess.score > 0 ? dateGuess.col : 19;
+  const qtyCol = findColumnByHeader(rows, [/qty/i, /quantity/i, /عدد/, /كمية/, /قطع/], 14);
+  const tahseelCol = findColumnByHeader(rows, [/amount/i, /total/i, /collect/i, /تحصيل/, /المطلوب/], 23);
+  let matchedByDate = 0;
+  let usedDateFallback = false;
 
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row || row.length < 20) continue;
-    if (!inRange(row[19], dateFrom, dateTo)) continue;
+  let acceptedRows = dataRows.filter(row => {
+    const ok = inRange(row[dateCol], dateFrom, dateTo);
+    if (ok) matchedByDate++;
+    return ok;
+  });
+
+  if (acceptedRows.length === 0 && dataRows.length > 0) {
+    acceptedRows = dataRows;
+    usedDateFallback = true;
+  }
+
+  for (const row of acceptedRows) {
     totalOrders++;
-    const qty = parseFloat(row[14]);
+    const qty = parseNumber(row[qtyCol]);
     if (!isNaN(qty) && qty > 0) { qtySum += qty; qtyCount++; }
     if (isDelivered) {
-      const t = parseFloat(row[23]);
+      const t = parseNumber(row[tahseelCol]);
       if (!isNaN(t)) { sumT += t; tahseelCount++; }
     }
+  }
+
+  if (onLog) {
+    lg(
+      onLog,
+      usedDateFallback ? "warn" : "info",
+      `📄 Excel parsed: rows=${dataRows.length}, dateCol=${dateCol}, dateMatched=${matchedByDate}, qtyCol=${qtyCol}${isDelivered ? `, tahseelCol=${tahseelCol}` : ""}${usedDateFallback ? " — used export rows because date parsing matched 0" : ""}`
+    );
   }
 
   return {
@@ -299,7 +382,7 @@ async function runKhod({ member, dateFrom, dateTo, onLog, launchMinimized, cance
       throw new Error("Khod session expired after navigating to orders page");
     }
     const allBuffer = await filterAndExport(page, fromDate, toDate, onLog);
-    const allData   = parseSheet(allBuffer, fromDate, toDate, false);
+    const allData   = parseSheet(allBuffer, fromDate, toDate, false, onLog);
     lg(onLog, "ok", `✅ All: ${allData.totalOrders} orders | Avg Qty: ${allData.avgQty}`);
 
     // ── Check for cancellation between phases ──
@@ -314,7 +397,7 @@ async function runKhod({ member, dateFrom, dateTo, onLog, launchMinimized, cance
       throw new Error("Khod session expired after navigating to delivered orders page");
     }
     const delBuffer = await filterAndExport(page, fromDate, toDate, onLog);
-    const delData   = parseSheet(delBuffer, fromDate, toDate, true);
+    const delData   = parseSheet(delBuffer, fromDate, toDate, true, onLog);
     lg(onLog, "ok", `✅ Delivered: ${delData.totalOrders} | Sum: ${delData.sumTahseel} | Avg: ${delData.avgTahseel} | Qty: ${delData.avgQty}`);
 
     await closeChrome(context, onLog);

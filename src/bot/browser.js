@@ -251,8 +251,20 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
 // CLOSE — graceful + 2000ms OS settle (Mac needs more time)
 // ─────────────────────────────────────────────────
 async function closeChrome(context, onLog) {
-  openContexts.delete(context);
-  try { if (context) await context.close(); } catch {}
+  let closed = false;
+  try {
+    if (context) {
+      const timeoutMs = process.platform === "darwin" ? 10000 : 8000;
+      await Promise.race([
+        context.close().then(() => { closed = true; }),
+        new Promise(resolve => setTimeout(resolve, timeoutMs)),
+      ]);
+      if (!closed) {
+        onLog({ type: "warn", msg: `Chrome close timed out after ${timeoutMs / 1000}s; continuing run finalization` });
+      }
+    }
+  } catch {}
+  if (closed) openContexts.delete(context);
   // Give OS time to fully release the profile locks before the next launch.
   // Mac is slow to release SingletonLock — 2s is safe, 600ms was not enough.
   await new Promise(r => setTimeout(r, 2000));
