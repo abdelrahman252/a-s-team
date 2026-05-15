@@ -150,17 +150,19 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
       "--no-pings",
       "--disable-background-timer-throttling",
       "--disable-renderer-backgrounding",
+      "--disable-backgrounding-occluded-windows",
       "--disable-component-extensions-with-background-pages",
       "--disable-v8-idle-tasks",
+      "--disable-features=CalculateNativeWinOcclusion",
       "--force-device-scale-factor=1",
       "--window-size=1280,800",
       // Only go off-screen when launchMinimized is explicitly ON.
       // On Mac, NEVER use --window-position=-32000,-32000 unconditionally —
       // macOS suspends rendering for off-screen windows, causing ERR_ABORTED on
       // the very first page.goto(). Windows is fine with extreme positions.
-      // Mac off-screen uses -4000,-4000 (just beyond any realistic display) which
-      // is far enough to be invisible but close enough that macOS doesn't suspend it.
-      ...(launchMinimized ? (isMac ? ["--window-position=-4000,-4000"] : ["--window-position=-32000,-32000"]) : []),
+      // Mac stays on-screen in a normal window; minimizing/off-screening Chrome
+      // can make the renderer stop long enough for TikTok navigations to abort.
+      ...(launchMinimized && !isMac ? ["--window-position=-32000,-32000"] : []),
       "--disable-infobars",
       "--disable-notifications",
       "--lang=en-US",
@@ -207,11 +209,26 @@ async function launchChrome(onLog, profileKey, launchMinimized) {
 
   const page = context.pages()[0] || (await context.newPage());
 
-  if (launchMinimized) {
-    // Minimize Chrome window via CDP — works on both Windows and Mac.
+  if (isMac) {
+    try {
+      const cdp = await context.newCDPSession(page);
+      const { windowId } = await cdp.send("Browser.getWindowForTarget");
+      await cdp.send("Browser.setWindowBounds", {
+        windowId,
+        bounds: { left: 96, top: 96, width: 1280, height: 800, windowState: "normal" },
+      });
+      await cdp.detach();
+      if (launchMinimized) {
+        onLog({ type: "info", msg: "Mac mode: Chrome kept visible/stable instead of minimized to prevent aborted TikTok loads" });
+      }
+    } catch (e) {
+      onLog({ type: "info", msg: `Could not normalize Chrome window on Mac: ${e.message}` });
+    }
+  } else if (launchMinimized) {
+    // Minimize Chrome window via CDP on non-Mac platforms.
     // Previously Mac skipped this and relied on --window-position=-32000,-32000,
     // but that position caused macOS to suspend rendering → ERR_ABORTED.
-    // CDP minimize is the correct approach on both platforms.
+    // Windows can safely run minimized without aborting Playwright navigations.
     try {
       const cdp = await context.newCDPSession(page);
       const { windowId } = await cdp.send("Browser.getWindowForTarget");

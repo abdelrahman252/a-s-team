@@ -43,6 +43,43 @@ function parseSpend(text) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+function isNavigationAbort(err) {
+  const msg = String(err?.message || err || "");
+  return (
+    msg.includes("net::ERR_ABORTED") ||
+    msg.includes("NS_BINDING_ABORTED")
+  );
+}
+
+async function gotoWithRetry(page, url, onLog, label, opts = {}) {
+  const attempts = opts.attempts || 3;
+  const waitUntil = opts.waitUntil || "domcontentloaded";
+  const timeout = opts.timeout || 45000;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await page.goto(url, { waitUntil, timeout });
+      return;
+    } catch (err) {
+      if (page.isClosed()) throw err;
+      if (!isNavigationAbort(err) || attempt === attempts) throw err;
+
+      lg(onLog, "warn", `   🌐 ${label} aborted (${attempt}/${attempts}) — retrying navigation...`);
+      await sleep(900 * attempt);
+
+      try {
+        await page.waitForLoadState("domcontentloaded", { timeout: 3000 });
+      } catch {}
+
+      try {
+        await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 10000 });
+      } catch {}
+
+      await sleep(300);
+    }
+  }
+}
+
 // ════════════════════════════════════════════════════════
 // SESSION HELPERS
 // ════════════════════════════════════════════════════════
@@ -74,7 +111,7 @@ async function ensureSession(page, onLog, label) {
 
 async function confirmInitialLogin(page, onLog) {
   lg(onLog, "info", "🔑 Checking TikTok session...");
-  await page.goto("https://ads.tiktok.com/i18n/dashboard", {
+  await gotoWithRetry(page, "https://ads.tiktok.com/i18n/dashboard", onLog, "Initial TikTok session check", {
     waitUntil: "domcontentloaded",
     timeout: 30000,
   });
@@ -663,7 +700,11 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
   // Navigate with one retry if we land on login
   for (let attempt = 0; attempt < 2; attempt++) {
     lg(onLog, "info", `   🌐 Navigating... (attempt ${attempt + 1})`);
-    await page.goto(cleanUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await gotoWithRetry(page, cleanUrl, onLog, `Campaign page ${aadvid || "?"}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 45000,
+      attempts: process.platform === "darwin" ? 4 : 3,
+    });
     await sleep(800);
     if (isLoginUrl(page.url())) {
       lg(onLog, "warn", "   ⚠️ Redirected to login — recovering...");
@@ -678,7 +719,10 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
   // One more session check before we start interacting
   if (isLoginUrl(page.url())) {
     await ensureSession(page, onLog, `pre-scrape ${aadvid || "?"}`);
-    await page.goto(cleanUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await gotoWithRetry(page, cleanUrl, onLog, `Pre-scrape campaign reload ${aadvid || "?"}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 45000,
+    });
     await sleep(800);
     await waitForCampaignsPage(page, aadvid, onLog);
   }
@@ -691,7 +735,10 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
     lg(onLog, "warn", `   ⚠️ Accidental navigation to campaign creation — recovering...`);
     await page.keyboard.press("Escape");
     await sleep(300);
-    await page.goto(cleanUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await gotoWithRetry(page, cleanUrl, onLog, `Campaign creation recovery ${aadvid || "?"}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 45000,
+    });
     await sleep(800);
     await waitForCampaignsPage(page, aadvid, onLog);
     await setDateRange(page, dateFrom, dateTo, onLog);
@@ -703,7 +750,10 @@ async function scrapeAccount(page, accountUrl, dateFrom, dateTo, onLog) {
   if (spend === "SESSION_EXPIRED") {
     lg(onLog, "warn", "   ⚠️ Session expired while reading spend — recovering...");
     await ensureSession(page, onLog, `spend-read ${aadvid || "?"}`);
-    await page.goto(cleanUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await gotoWithRetry(page, cleanUrl, onLog, `Spend-read campaign reload ${aadvid || "?"}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 45000,
+    });
     await sleep(800);
     await waitForCampaignsPage(page, aadvid, onLog);
     await setDateRange(page, dateFrom, dateTo, onLog);
